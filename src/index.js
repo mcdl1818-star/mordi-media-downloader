@@ -114,7 +114,11 @@ async function dispatchUpdate(update) {
 
 async function startWebhook() {
   if (!config.webhookSecret) throw new Error("במצב webhook חסר WEBHOOK_SECRET");
-  const webhookPath = `/telegram/${config.webhookSecret}`;
+  const safeSecret = crypto
+    .createHash("sha256")
+    .update(config.webhookSecret)
+    .digest("hex");
+  const webhookPath = `/telegram/${safeSecret}`;
   const server = http.createServer((request, response) => {
     if (request.method === "GET" && request.url === "/") {
       response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
@@ -149,7 +153,7 @@ async function startWebhook() {
   const target = `${config.webhookUrl.replace(/\/$/, "")}${webhookPath}`;
   await telegram.call("setWebhook", {
     url: target,
-    secret_token: config.webhookSecret,
+    secret_token: safeSecret,
     allowed_updates: ["message", "callback_query"],
     drop_pending_updates: false
   });
