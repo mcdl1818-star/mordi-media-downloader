@@ -94,6 +94,52 @@ async function listFilesRecursively(directory) {
     .filter(file => !file.endsWith(".part"));
 }
 
+function decodeInstagramJsonString(value) {
+  return JSON.parse(`"${value}"`).replace(/\\\//g, "/").replace(/\\u0025/g, "%");
+}
+
+async function downloadInstagramEmbed(url, jobDir) {
+  const source = new URL(url);
+  const match = source.pathname.match(/^\/(?:p|reel)\/([^/]+)/);
+  if (!match) throw new Error("לא ניתן לזהות את כתובת הפוסט באינסטגרם.");
+
+  const response = await fetch(`https://www.instagram.com/p/${match[1]}/embed/captioned/`, {
+    headers: {
+      "user-agent": "Mozilla/5.0"
+    }
+  });
+  if (!response.ok) throw new Error("אינסטגרם חסם זמנית את הגישה לפוסט.");
+
+  const html = await response.text();
+  const mediaUrls = [];
+  const displayMarker = "\\\"display_url\\\":\\\"";
+  let cursor = 0;
+  while ((cursor = html.indexOf(displayMarker, cursor)) !== -1) {
+    const start = cursor + displayMarker.length;
+    const end = html.indexOf("\\\"", start);
+    if (end === -1) break;
+    const mediaUrl = decodeInstagramJsonString(html.slice(start, end));
+    if (!mediaUrls.includes(mediaUrl)) mediaUrls.push(mediaUrl);
+    cursor = end + 2;
+  }
+  if (!mediaUrls.length) throw new Error("לא נמצאה מדיה ציבורית בפוסט.");
+
+  const files = [];
+  for (let index = 0; index < mediaUrls.length; index += 1) {
+    const mediaResponse = await fetch(mediaUrls[index], {
+      headers: { "user-agent": "Mozilla/5.0", referer: "https://www.instagram.com/" }
+    });
+    if (!mediaResponse.ok) continue;
+    const contentType = mediaResponse.headers.get("content-type") || "";
+    const extension = contentType.includes("png") ? ".png" : contentType.includes("webp") ? ".webp" : ".jpg";
+    const filePath = path.join(jobDir, `${String(index + 1).padStart(2, "0")}${extension}`);
+    await fs.promises.writeFile(filePath, Buffer.from(await mediaResponse.arrayBuffer()));
+    files.push(filePath);
+  }
+  if (!files.length) throw new Error("אינסטגרם חסם זמנית את הורדת קובצי המדיה.");
+  return files;
+}
+
 export async function downloadGallery(url, config) {
   await fs.promises.mkdir(config.tempDir, { recursive: true });
   const jobDir = path.join(config.tempDir, crypto.randomUUID());
@@ -109,6 +155,14 @@ export async function downloadGallery(url, config) {
     if (!files.length) throw new Error("לא נמצאו תמונות או סרטונים בפוסט.");
     return files;
   } catch (error) {
+    if (/instagram\.com$/i.test(new URL(url).hostname)) {
+      try {
+        return await downloadInstagramEmbed(url, jobDir);
+      } catch (fallbackError) {
+        await fs.promises.rm(jobDir, { recursive: true, force: true });
+        throw fallbackError;
+      }
+    }
     await fs.promises.rm(jobDir, { recursive: true, force: true });
     throw error;
   }
