@@ -14,10 +14,19 @@ const PLATFORM_RULES = [
 
 const EXTRACTOR_ARGS = [
   "--js-runtimes", "node",
-  "--extractor-args", "youtube:player_client=mweb",
   "--extractor-args", "youtubepot-bgutilscript:server_home=/opt/bgutil/server",
   "--extractor-args", "twitter:api=syndication"
 ];
+
+const YOUTUBE_CLIENTS = ["mweb", "web_embedded", "android_vr"];
+
+function extractorArgs(url, youtubeClient) {
+  const args = [...EXTRACTOR_ARGS];
+  if (/(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname) && youtubeClient) {
+    args.push("--extractor-args", `youtube:player_client=${youtubeClient}`);
+  }
+  return args;
+}
 
 export function validateMediaUrl(input) {
   let url;
@@ -84,13 +93,24 @@ async function getVimeoConfig(url) {
 export async function inspectUrl(url, config) {
   let info;
   try {
-    const output = await run(config.ytDlpPath, [
-      "--no-playlist", "--dump-single-json", "--no-warnings",
-      ...EXTRACTOR_ARGS,
-      "-f", "b/bv*+ba",
-      "--", url
-    ], { timeoutMs: 60_000 });
-    info = JSON.parse(output);
+    const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
+    const clients = isYouTube ? YOUTUBE_CLIENTS : [null];
+    let lastError;
+    for (const client of clients) {
+      try {
+        const output = await run(config.ytDlpPath, [
+          "--no-playlist", "--dump-single-json", "--no-warnings",
+          ...extractorArgs(url, client),
+          "-f", "b/bv*+ba",
+          "--", url
+        ], { timeoutMs: 60_000 });
+        info = JSON.parse(output);
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!info) throw lastError;
   } catch (error) {
     if (!/(^|\.)vimeo\.com$/i.test(new URL(url).hostname)) throw error;
     const vimeo = await getVimeoConfig(url);
@@ -120,7 +140,6 @@ export async function download(url, kind, config) {
   const outputTemplate = path.join(jobDir, "%(title).80B [%(id)s].%(ext)s");
   const common = [
     "--no-playlist", "--windows-filenames", "--trim-filenames", "120",
-    ...EXTRACTOR_ARGS,
     "--ffmpeg-location", config.ffmpegPath,
     "-o", outputTemplate
   ];
@@ -128,7 +147,20 @@ export async function download(url, kind, config) {
     ? ["-x", "--audio-format", "mp3", "--audio-quality", "5"]
     : ["-f", "bv*[height<=720]+ba/b[height<=720]/b", "--merge-output-format", "mp4"];
   try {
-    await run(config.ytDlpPath, [...common, ...mediaArgs, "--", url]);
+    const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
+    const clients = isYouTube ? YOUTUBE_CLIENTS : [null];
+    let completed = false;
+    let lastError;
+    for (const client of clients) {
+      try {
+        await run(config.ytDlpPath, [...common, ...extractorArgs(url, client), ...mediaArgs, "--", url]);
+        completed = true;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!completed) throw lastError;
   } catch (error) {
     if (!/(^|\.)vimeo\.com$/i.test(new URL(url).hostname)) throw error;
     const vimeo = await getVimeoConfig(url);
