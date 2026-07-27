@@ -14,7 +14,6 @@ const PLATFORM_RULES = [
 
 const EXTRACTOR_ARGS = [
   "--js-runtimes", "node",
-  "--extractor-args", "youtube:player_client=tv,mweb;formats=incomplete",
   "--extractor-args", "twitter:api=syndication"
 ];
 
