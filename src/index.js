@@ -3,7 +3,7 @@ import http from "node:http";
 import { readConfig } from "./config.js";
 import { Telegram } from "./telegram.js";
 import crypto from "node:crypto";
-import { validateMediaUrl, inspectUrl, download, downloadGallery, cleanupFile, assertFileSize } from "./downloader.js";
+import { extractSupportedMediaUrl, inspectUrl, download, downloadGallery, cleanupFile, assertFileSize } from "./downloader.js";
 
 const config = readConfig();
 const telegram = new Telegram(config.token);
@@ -22,8 +22,8 @@ function keyboard(id) {
   };
 }
 
-function platformKeyboard(platform, id) {
-  if (platform === "Instagram") {
+function platformKeyboard(platform, id, url) {
+  if (platform === "Instagram" && !new URL(url).pathname.startsWith("/reel/")) {
     return {
       inline_keyboard: [[
         { text: "🖼 הורד את כל המדיה", callback_data: `gallery:${id}` }
@@ -38,6 +38,30 @@ function formatDuration(seconds) {
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
+function userFacingError(error) {
+  const message = String(error?.message || "");
+  if (/login|sign.?in|cookies|authentication/i.test(message)) {
+    return "האתר דורש התחברות או חסם זמנית את ההורדה. נסה שוב מאוחר יותר או שלח קישור ציבורי אחר.";
+  }
+  if (/private|not available|unavailable|deleted|restricted/i.test(message)) {
+    return "התוכן פרטי, הוסר או אינו זמין לצפייה ציבורית.";
+  }
+  if (/unsupported|no video formats|not a valid URL/i.test(message)) {
+    return "לא נמצאה מדיה שניתן להוריד מהקישור הזה.";
+  }
+  if (/timed? out|ארכה יותר מדי/i.test(message)) {
+    return "האתר לא הגיב בזמן. נסה שוב בעוד דקה.";
+  }
+  return message.length <= 220 ? message : "ההורדה נכשלה בגלל מגבלה זמנית של האתר. נסה שוב מאוחר יותר.";
+}
+
+function removeExpiredSelections() {
+  const now = Date.now();
+  for (const [id, item] of pending) {
+    if (now - item.createdAt > config.tempTtlMs) pending.delete(id);
+  }
+}
+
 async function handleMessage(message) {
   const userId = String(message.from?.id || "");
   if (userId !== config.allowedUserId) {
@@ -46,13 +70,14 @@ async function handleMessage(message) {
   }
   const chatId = message.chat.id;
   const text = message.text?.trim() || "";
+  removeExpiredSelections();
   if (text === "/start" || text === "/help") {
     await telegram.sendMessage(chatId,
       `שלום! שלח לי קישור מ־YouTube, Instagram, Facebook, X/Twitter, TikTok או Vimeo ואציג אפשרויות הורדה.\n\n${TERMS}`);
     return;
   }
   try {
-    const { url, platform } = validateMediaUrl(text);
+    const { url, platform } = extractSupportedMediaUrl(text);
     const status = await telegram.sendMessage(chatId, "🔎 בודק את הקישור...");
     let info;
     try {
@@ -72,10 +97,10 @@ async function handleMessage(message) {
       chat_id: chatId,
       message_id: status.message_id,
       text: `🌐 ${platform}\n🎞 ${info.title}\n👤 ${info.channel}\n⏱ ${formatDuration(info.duration)}\n\nבחר פורמט:`,
-      reply_markup: platformKeyboard(platform, selectionId)
+      reply_markup: platformKeyboard(platform, selectionId, url)
     });
   } catch (error) {
-    await telegram.sendMessage(chatId, `❌ ${error.message}`);
+    await telegram.sendMessage(chatId, `❌ ${userFacingError(error)}`);
   }
 }
 
@@ -111,7 +136,7 @@ async function handleCallback(query) {
     await assertFileSize(filePath, config.maxBytes);
     await telegram.sendFile(kind === "audio" ? "sendAudio" : "sendVideo", query.message.chat.id, filePath, item.title);
   } catch (error) {
-    await telegram.sendMessage(query.message.chat.id, `❌ ${error.message}`);
+    await telegram.sendMessage(query.message.chat.id, `❌ ${userFacingError(error)}`);
   } finally {
     busyUsers.delete(userId);
     if (filePath) await cleanupFile(filePath).catch(console.error);

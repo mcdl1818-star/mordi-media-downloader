@@ -12,6 +12,11 @@ const PLATFORM_RULES = [
   ["Vimeo", /(^|\.)vimeo\.com$/]
 ];
 
+const EXTRACTOR_ARGS = [
+  "--extractor-args", "youtube:player_client=tv,mweb;formats=incomplete",
+  "--extractor-args", "twitter:api=syndication"
+];
+
 export function validateMediaUrl(input) {
   let url;
   try {
@@ -24,6 +29,19 @@ export function validateMediaUrl(input) {
     throw new Error("הקישור אינו מפלטפורמה נתמכת.");
   }
   return { url: url.toString(), platform: platform[0] };
+}
+
+export function extractSupportedMediaUrl(input) {
+  const candidates = String(input || "").match(/https:\/\/[^\s<>"']+/g) || [];
+  for (const candidate of candidates) {
+    const cleaned = candidate.replace(/[)\],.!?]+$/, "");
+    try {
+      return validateMediaUrl(cleaned);
+    } catch {
+      // Continue to the next URL when a message contains an unrelated link first.
+    }
+  }
+  return validateMediaUrl(String(input || "").trim());
 }
 
 export const validateYouTubeUrl = input => validateMediaUrl(input).url;
@@ -52,7 +70,10 @@ function run(command, args, { timeoutMs = 10 * 60_000 } = {}) {
 
 export async function inspectUrl(url, config) {
   const output = await run(config.ytDlpPath, [
-    "--no-playlist", "--dump-single-json", "--no-warnings", "--", url
+    "--no-playlist", "--dump-single-json", "--no-warnings",
+    ...EXTRACTOR_ARGS,
+    "-f", "b/bv*+ba",
+    "--", url
   ], { timeoutMs: 60_000 });
   const info = JSON.parse(output);
   return {
@@ -72,6 +93,7 @@ export async function download(url, kind, config) {
   const outputTemplate = path.join(jobDir, "%(title).80B [%(id)s].%(ext)s");
   const common = [
     "--no-playlist", "--windows-filenames", "--trim-filenames", "120",
+    ...EXTRACTOR_ARGS,
     "--ffmpeg-location", config.ffmpegPath,
     "-o", outputTemplate
   ];
@@ -98,12 +120,27 @@ function decodeInstagramJsonString(value) {
   return JSON.parse(`"${value}"`).replace(/\\\//g, "/").replace(/\\u0025/g, "%");
 }
 
+function extractInstagramValues(html, field) {
+  const values = [];
+  const marker = `\\\"${field}\\\":\\\"`;
+  let cursor = 0;
+  while ((cursor = html.indexOf(marker, cursor)) !== -1) {
+    const start = cursor + marker.length;
+    const end = html.indexOf("\\\"", start);
+    if (end === -1) break;
+    const value = decodeInstagramJsonString(html.slice(start, end));
+    if (!values.includes(value)) values.push(value);
+    cursor = end + 2;
+  }
+  return values;
+}
+
 async function downloadInstagramEmbed(url, jobDir) {
   const source = new URL(url);
-  const match = source.pathname.match(/^\/(?:p|reel)\/([^/]+)/);
+  const match = source.pathname.match(/^\/(p|reel)\/([^/]+)/);
   if (!match) throw new Error("לא ניתן לזהות את כתובת הפוסט באינסטגרם.");
 
-  const response = await fetch(`https://www.instagram.com/p/${match[1]}/embed/captioned/`, {
+  const response = await fetch(`https://www.instagram.com/${match[1]}/${match[2]}/embed/captioned/`, {
     headers: {
       "user-agent": "Mozilla/5.0"
     }
@@ -111,17 +148,11 @@ async function downloadInstagramEmbed(url, jobDir) {
   if (!response.ok) throw new Error("אינסטגרם חסם זמנית את הגישה לפוסט.");
 
   const html = await response.text();
-  const mediaUrls = [];
-  const displayMarker = "\\\"display_url\\\":\\\"";
-  let cursor = 0;
-  while ((cursor = html.indexOf(displayMarker, cursor)) !== -1) {
-    const start = cursor + displayMarker.length;
-    const end = html.indexOf("\\\"", start);
-    if (end === -1) break;
-    const mediaUrl = decodeInstagramJsonString(html.slice(start, end));
-    if (!mediaUrls.includes(mediaUrl)) mediaUrls.push(mediaUrl);
-    cursor = end + 2;
-  }
+  const displayUrls = extractInstagramValues(html, "display_url");
+  const videoUrls = extractInstagramValues(html, "video_url");
+  const mediaUrls = match[1] === "reel" && videoUrls.length
+    ? videoUrls
+    : [...displayUrls, ...videoUrls.filter(item => !displayUrls.includes(item))];
   if (!mediaUrls.length) throw new Error("לא נמצאה מדיה ציבורית בפוסט.");
 
   const files = [];
@@ -131,7 +162,9 @@ async function downloadInstagramEmbed(url, jobDir) {
     });
     if (!mediaResponse.ok) continue;
     const contentType = mediaResponse.headers.get("content-type") || "";
-    const extension = contentType.includes("png") ? ".png" : contentType.includes("webp") ? ".webp" : ".jpg";
+    const extension = contentType.includes("video") ? ".mp4"
+      : contentType.includes("png") ? ".png"
+        : contentType.includes("webp") ? ".webp" : ".jpg";
     const filePath = path.join(jobDir, `${String(index + 1).padStart(2, "0")}${extension}`);
     await fs.promises.writeFile(filePath, Buffer.from(await mediaResponse.arrayBuffer()));
     files.push(filePath);
