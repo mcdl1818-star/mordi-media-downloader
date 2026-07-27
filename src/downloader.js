@@ -12,6 +12,11 @@ const PLATFORM_RULES = [
   ["Vimeo", /(^|\.)vimeo\.com$/]
 ];
 
+const EXTRACTOR_ARGS = [
+  "--js-runtimes", "node",
+  "--extractor-args", "twitter:api=syndication"
+];
+
 export function validateMediaUrl(input) {
   let url;
   try {
@@ -24,6 +29,19 @@ export function validateMediaUrl(input) {
     throw new Error("הקישור אינו מפלטפורמה נתמכת.");
   }
   return { url: url.toString(), platform: platform[0] };
+}
+
+export function extractSupportedMediaUrl(input) {
+  const candidates = String(input || "").match(/https:\/\/[^\s<>"']+/g) || [];
+  for (const candidate of candidates) {
+    const cleaned = candidate.replace(/[)\],.!?]+$/, "");
+    try {
+      return validateMediaUrl(cleaned);
+    } catch {
+      // Continue to the next URL when a message contains an unrelated link first.
+    }
+  }
+  return validateMediaUrl(String(input || "").trim());
 }
 
 export const validateYouTubeUrl = input => validateMediaUrl(input).url;
@@ -50,11 +68,39 @@ function run(command, args, { timeoutMs = 10 * 60_000 } = {}) {
   });
 }
 
+async function getVimeoConfig(url) {
+  const parsed = new URL(url);
+  const id = parsed.pathname.match(/(?:video\/)?(\d+)/)?.[1];
+  if (!id) throw new Error("לא ניתן לזהות את סרטון Vimeo.");
+  const response = await fetch(`https://player.vimeo.com/video/${id}/config`, {
+    headers: { "user-agent": "Mozilla/5.0", referer: url }
+  });
+  if (!response.ok) throw new Error("Vimeo חסם זמנית את הגישה לסרטון.");
+  return response.json();
+}
+
 export async function inspectUrl(url, config) {
-  const output = await run(config.ytDlpPath, [
-    "--no-playlist", "--dump-single-json", "--no-warnings", "--", url
-  ], { timeoutMs: 60_000 });
-  const info = JSON.parse(output);
+  let info;
+  try {
+    const output = await run(config.ytDlpPath, [
+      "--no-playlist", "--dump-single-json", "--no-warnings",
+      ...EXTRACTOR_ARGS,
+      "-f", "b/bv*+ba",
+      "--", url
+    ], { timeoutMs: 60_000 });
+    info = JSON.parse(output);
+  } catch (error) {
+    if (!/(^|\.)vimeo\.com$/i.test(new URL(url).hostname)) throw error;
+    const vimeo = await getVimeoConfig(url);
+    info = {
+      id: String(vimeo.video?.id || ""),
+      extractor_key: "Vimeo",
+      title: vimeo.video?.title,
+      uploader: vimeo.video?.owner?.name,
+      duration: vimeo.video?.duration,
+      webpage_url: url
+    };
+  }
   return {
     id: info.id,
     extractor: info.extractor_key || info.extractor || "Generic",
@@ -72,18 +118,46 @@ export async function download(url, kind, config) {
   const outputTemplate = path.join(jobDir, "%(title).80B [%(id)s].%(ext)s");
   const common = [
     "--no-playlist", "--windows-filenames", "--trim-filenames", "120",
+    ...EXTRACTOR_ARGS,
     "--ffmpeg-location", config.ffmpegPath,
     "-o", outputTemplate
   ];
   const mediaArgs = kind === "audio"
     ? ["-x", "--audio-format", "mp3", "--audio-quality", "5"]
     : ["-f", "bv*[height<=720]+ba/b[height<=720]/b", "--merge-output-format", "mp4"];
-  await run(config.ytDlpPath, [...common, ...mediaArgs, "--", url]);
+  try {
+    await run(config.ytDlpPath, [...common, ...mediaArgs, "--", url]);
+  } catch (error) {
+    if (!/(^|\.)vimeo\.com$/i.test(new URL(url).hostname)) throw error;
+    const vimeo = await getVimeoConfig(url);
+    const progressive = [...(vimeo.request?.files?.progressive || [])]
+      .filter(item => item.url)
+      .sort((a, b) => (b.height || 0) - (a.height || 0));
+    const selected = progressive.find(item => (item.height || 0) <= 720) || progressive.at(-1);
+    if (!selected) throw error;
+    const mediaResponse = await fetch(selected.url, { headers: { "user-agent": "Mozilla/5.0", referer: url } });
+    if (!mediaResponse.ok) throw new Error("Vimeo חסם זמנית את הורדת הסרטון.");
+    const sourcePath = path.join(jobDir, "vimeo-source.mp4");
+    await fs.promises.writeFile(sourcePath, Buffer.from(await mediaResponse.arrayBuffer()));
+    if (kind === "audio") {
+      const audioPath = path.join(jobDir, "vimeo-audio.mp3");
+      await run(config.ffmpegPath, ["-i", sourcePath, "-vn", "-c:a", "libmp3lame", "-q:a", "5", audioPath]);
+      await fs.promises.rm(sourcePath, { force: true });
+    }
+  }
   const files = (await fs.promises.readdir(jobDir))
     .filter(name => !name.endsWith(".part") && !name.endsWith(".ytdl"))
     .map(name => path.join(jobDir, name));
-  if (files.length !== 1) throw new Error("לא נמצא קובץ פלט יחיד לאחר ההורדה.");
-  return files[0];
+  const preferredExtension = kind === "audio" ? ".mp3" : ".mp4";
+  const preferred = files.filter(file => path.extname(file).toLowerCase() === preferredExtension);
+  const candidates = preferred.length ? preferred : files;
+  if (!candidates.length) throw new Error("לא נמצא קובץ מדיה לאחר ההורדה.");
+  const sizes = await Promise.all(candidates.map(async file => ({
+    file,
+    size: (await fs.promises.stat(file)).size
+  })));
+  sizes.sort((a, b) => b.size - a.size);
+  return sizes[0].file;
 }
 
 async function listFilesRecursively(directory) {
@@ -92,6 +166,63 @@ async function listFilesRecursively(directory) {
     .filter(entry => entry.isFile())
     .map(entry => path.join(entry.parentPath || entry.path, entry.name))
     .filter(file => !file.endsWith(".part"));
+}
+
+function decodeInstagramJsonString(value) {
+  return JSON.parse(`"${value}"`).replace(/\\\//g, "/").replace(/\\u0025/g, "%");
+}
+
+function extractInstagramValues(html, field) {
+  const values = [];
+  const marker = `\\\"${field}\\\":\\\"`;
+  let cursor = 0;
+  while ((cursor = html.indexOf(marker, cursor)) !== -1) {
+    const start = cursor + marker.length;
+    const end = html.indexOf("\\\"", start);
+    if (end === -1) break;
+    const value = decodeInstagramJsonString(html.slice(start, end));
+    if (!values.includes(value)) values.push(value);
+    cursor = end + 2;
+  }
+  return values;
+}
+
+async function downloadInstagramEmbed(url, jobDir) {
+  const source = new URL(url);
+  const match = source.pathname.match(/^\/(p|reel)\/([^/]+)/);
+  if (!match) throw new Error("לא ניתן לזהות את כתובת הפוסט באינסטגרם.");
+
+  const response = await fetch(`https://www.instagram.com/${match[1]}/${match[2]}/embed/captioned/`, {
+    headers: {
+      "user-agent": "Mozilla/5.0"
+    }
+  });
+  if (!response.ok) throw new Error("אינסטגרם חסם זמנית את הגישה לפוסט.");
+
+  const html = await response.text();
+  const displayUrls = extractInstagramValues(html, "display_url");
+  const videoUrls = extractInstagramValues(html, "video_url");
+  const mediaUrls = match[1] === "reel" && videoUrls.length
+    ? videoUrls
+    : [...displayUrls, ...videoUrls.filter(item => !displayUrls.includes(item))];
+  if (!mediaUrls.length) throw new Error("לא נמצאה מדיה ציבורית בפוסט.");
+
+  const files = [];
+  for (let index = 0; index < mediaUrls.length; index += 1) {
+    const mediaResponse = await fetch(mediaUrls[index], {
+      headers: { "user-agent": "Mozilla/5.0", referer: "https://www.instagram.com/" }
+    });
+    if (!mediaResponse.ok) continue;
+    const contentType = mediaResponse.headers.get("content-type") || "";
+    const extension = contentType.includes("video") ? ".mp4"
+      : contentType.includes("png") ? ".png"
+        : contentType.includes("webp") ? ".webp" : ".jpg";
+    const filePath = path.join(jobDir, `${String(index + 1).padStart(2, "0")}${extension}`);
+    await fs.promises.writeFile(filePath, Buffer.from(await mediaResponse.arrayBuffer()));
+    files.push(filePath);
+  }
+  if (!files.length) throw new Error("אינסטגרם חסם זמנית את הורדת קובצי המדיה.");
+  return files;
 }
 
 export async function downloadGallery(url, config) {
@@ -109,6 +240,14 @@ export async function downloadGallery(url, config) {
     if (!files.length) throw new Error("לא נמצאו תמונות או סרטונים בפוסט.");
     return files;
   } catch (error) {
+    if (/instagram\.com$/i.test(new URL(url).hostname)) {
+      try {
+        return await downloadInstagramEmbed(url, jobDir);
+      } catch (fallbackError) {
+        await fs.promises.rm(jobDir, { recursive: true, force: true });
+        throw fallbackError;
+      }
+    }
     await fs.promises.rm(jobDir, { recursive: true, force: true });
     throw error;
   }
