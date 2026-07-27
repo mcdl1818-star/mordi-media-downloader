@@ -13,6 +13,7 @@ const PLATFORM_RULES = [
 ];
 
 const EXTRACTOR_ARGS = [
+  "--js-runtimes", "node",
   "--extractor-args", "youtube:player_client=tv,mweb;formats=incomplete",
   "--extractor-args", "twitter:api=syndication"
 ];
@@ -104,8 +105,16 @@ export async function download(url, kind, config) {
   const files = (await fs.promises.readdir(jobDir))
     .filter(name => !name.endsWith(".part") && !name.endsWith(".ytdl"))
     .map(name => path.join(jobDir, name));
-  if (files.length !== 1) throw new Error("לא נמצא קובץ פלט יחיד לאחר ההורדה.");
-  return files[0];
+  const preferredExtension = kind === "audio" ? ".mp3" : ".mp4";
+  const preferred = files.filter(file => path.extname(file).toLowerCase() === preferredExtension);
+  const candidates = preferred.length ? preferred : files;
+  if (!candidates.length) throw new Error("לא נמצא קובץ מדיה לאחר ההורדה.");
+  const sizes = await Promise.all(candidates.map(async file => ({
+    file,
+    size: (await fs.promises.stat(file)).size
+  })));
+  sizes.sort((a, b) => b.size - a.size);
+  return sizes[0].file;
 }
 
 async function listFilesRecursively(directory) {
