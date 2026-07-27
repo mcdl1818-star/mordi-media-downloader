@@ -1,0 +1,9 @@
+.env
+temp/
+*.part
+*.ytdl
+*.cookies.txt
+cookies/
+browser-profiles/
+logs/
+node_modules/

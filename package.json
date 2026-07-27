@@ -1,0 +1,14 @@
+{
+  "name": "personal-telegram-media-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "בוט Telegram אישי ולימודי להורדת תוכן מורשה",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js && node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

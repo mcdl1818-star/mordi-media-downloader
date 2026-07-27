@@ -1,0 +1,23 @@
+services:
+  telegram-bot:
+    build:
+      context: .
+    container_name: personal-telegram-media-bot
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    volumes:
+      - bot-temp:/app/temp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.5"
+
+volumes:
+  bot-temp:
