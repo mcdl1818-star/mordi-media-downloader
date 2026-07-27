@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: mordi-media-downloader
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ALLOWED_TELEGRAM_USER_ID
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: WEBHOOK_URL
+        value: https://mordi-media-downloader.onrender.com
+      - key: MAX_FILE_SIZE_MB
+        value: "49"
+      - key: TEMP_TTL_MINUTES
+        value: "30"

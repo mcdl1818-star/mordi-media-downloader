@@ -1,0 +1,12 @@
+.env
+.git
+.gitignore
+temp
+test
+DEPLOY_ORACLE_HE.md
+SYSTEM_SPEC_HE.md
+*.cookies.txt
+cookies
+browser-profiles
+logs
+node_modules
