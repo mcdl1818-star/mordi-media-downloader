@@ -86,6 +86,34 @@ export async function download(url, kind, config) {
   return files[0];
 }
 
+async function listFilesRecursively(directory) {
+  const entries = await fs.promises.readdir(directory, { recursive: true, withFileTypes: true });
+  return entries
+    .filter(entry => entry.isFile())
+    .map(entry => path.join(entry.parentPath || entry.path, entry.name))
+    .filter(file => !file.endsWith(".part"));
+}
+
+export async function downloadGallery(url, config) {
+  await fs.promises.mkdir(config.tempDir, { recursive: true });
+  const jobDir = path.join(config.tempDir, crypto.randomUUID());
+  await fs.promises.mkdir(jobDir);
+  try {
+    await run(config.galleryDlPath, [
+      "--destination", jobDir,
+      "--no-part",
+      "--no-mtime",
+      "--", url
+    ]);
+    const files = await listFilesRecursively(jobDir);
+    if (!files.length) throw new Error("לא נמצאו תמונות או סרטונים בפוסט.");
+    return files;
+  } catch (error) {
+    await fs.promises.rm(jobDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 export async function cleanupFile(filePath) {
   await fs.promises.rm(path.dirname(filePath), { recursive: true, force: true });
 }

@@ -27,6 +27,7 @@ export function readConfig() {
     token,
     allowedUserId,
     ytDlpPath: process.env.YT_DLP_PATH?.trim() || "yt-dlp",
+    galleryDlPath: process.env.GALLERY_DL_PATH?.trim() || "gallery-dl",
     ffmpegPath: process.env.FFMPEG_PATH?.trim() || "ffmpeg",
     maxBytes: (Number(process.env.MAX_FILE_SIZE_MB) || 49) * 1024 * 1024,
     tempTtlMs: (Number(process.env.TEMP_TTL_MINUTES) || 30) * 60_000,

@@ -3,7 +3,7 @@ import http from "node:http";
 import { readConfig } from "./config.js";
 import { Telegram } from "./telegram.js";
 import crypto from "node:crypto";
-import { validateMediaUrl, inspectUrl, download, cleanupFile, assertFileSize } from "./downloader.js";
+import { validateMediaUrl, inspectUrl, download, downloadGallery, cleanupFile, assertFileSize } from "./downloader.js";
 
 const config = readConfig();
 const telegram = new Telegram(config.token);
@@ -20,6 +20,17 @@ function keyboard(id) {
       { text: "🎵 MP3", callback_data: `audio:${id}` }
     ]]
   };
+}
+
+function platformKeyboard(platform, id) {
+  if (platform === "Instagram") {
+    return {
+      inline_keyboard: [[
+        { text: "🖼 הורד את כל המדיה", callback_data: `gallery:${id}` }
+      ]]
+    };
+  }
+  return keyboard(id);
 }
 
 function formatDuration(seconds) {
@@ -43,14 +54,25 @@ async function handleMessage(message) {
   try {
     const { url, platform } = validateMediaUrl(text);
     const status = await telegram.sendMessage(chatId, "🔎 בודק את הקישור...");
-    const info = await inspectUrl(url, config);
+    let info;
+    try {
+      info = await inspectUrl(url, config);
+    } catch (error) {
+      if (platform !== "Instagram") throw error;
+      info = {
+        title: "פוסט Instagram",
+        channel: "Instagram",
+        duration: 0,
+        webpageUrl: url
+      };
+    }
     const selectionId = crypto.randomBytes(8).toString("hex");
     pending.set(selectionId, { url: info.webpageUrl, title: info.title, platform, createdAt: Date.now() });
     await telegram.call("editMessageText", {
       chat_id: chatId,
       message_id: status.message_id,
       text: `🌐 ${platform}\n🎞 ${info.title}\n👤 ${info.channel}\n⏱ ${formatDuration(info.duration)}\n\nבחר פורמט:`,
-      reply_markup: keyboard(selectionId)
+      reply_markup: platformKeyboard(platform, selectionId)
     });
   } catch (error) {
     await telegram.sendMessage(chatId, `❌ ${error.message}`);
@@ -74,6 +96,16 @@ async function handleCallback(query) {
   busyUsers.add(userId);
   let filePath;
   try {
+    if (kind === "gallery") {
+      await telegram.sendMessage(query.message.chat.id, "🖼 מוריד את כל התמונות והסרטונים מהפוסט...");
+      const files = await downloadGallery(item.url, config);
+      for (let index = 0; index < files.length; index += 1) {
+        filePath = files[index];
+        await assertFileSize(filePath, config.maxBytes);
+        await telegram.sendFile("sendDocument", query.message.chat.id, filePath, `${item.title} • ${index + 1}/${files.length}`);
+      }
+      return;
+    }
     await telegram.sendMessage(query.message.chat.id, kind === "audio" ? "🎵 מכין MP3..." : "🎬 מוריד וממזג וידאו...");
     filePath = await download(item.url, kind, config);
     await assertFileSize(filePath, config.maxBytes);

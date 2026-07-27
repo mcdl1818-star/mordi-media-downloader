@@ -30,7 +30,15 @@ export class Telegram {
     form.set("chat_id", String(chatId));
     form.set("caption", caption);
     const bytes = await fs.promises.readFile(filePath);
-    form.set(method === "sendAudio" ? "audio" : "video", new Blob([bytes]), filePath.split(/[\\/]/).at(-1));
+    const fields = {
+      sendAudio: "audio",
+      sendVideo: "video",
+      sendPhoto: "photo",
+      sendDocument: "document"
+    };
+    const field = fields[method];
+    if (!field) throw new Error(`שיטת שליחת קובץ לא נתמכת: ${method}`);
+    form.set(field, new Blob([bytes]), filePath.split(/[\\/]/).at(-1));
     const response = await fetch(`${this.baseUrl}/${method}`, { method: "POST", body: form });
     const result = await response.json();
     if (!result.ok) throw new Error(`Telegram ${method}: ${result.description}`);
