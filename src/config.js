@@ -32,6 +32,7 @@ export function readConfig() {
     maxBytes: (Number(process.env.MAX_FILE_SIZE_MB) || 49) * 1024 * 1024,
     tempTtlMs: (Number(process.env.TEMP_TTL_MINUTES) || 30) * 60_000,
     tempDir: path.resolve("temp"),
+    youtubeCookiesPath: path.resolve("temp", "youtube-cookies.txt"),
     port: Number(process.env.PORT) || 10000,
     webhookUrl: process.env.WEBHOOK_URL?.trim() || "",
     webhookSecret: process.env.WEBHOOK_SECRET?.trim() || ""

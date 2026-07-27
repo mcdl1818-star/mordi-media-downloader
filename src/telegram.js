@@ -25,6 +25,15 @@ export class Telegram {
     return this.call("answerCallbackQuery", { callback_query_id: id, text });
   }
 
+  async downloadFile(fileId, destination) {
+    const file = await this.call("getFile", { file_id: fileId });
+    const response = await fetch(`${this.baseUrl.replace("/bot", "/file/bot")}/${file.file_path}`);
+    if (!response.ok) throw new Error("Telegram לא הצליח להוריד את קובץ ה-Cookies.");
+    await fs.promises.writeFile(destination, Buffer.from(await response.arrayBuffer()), { mode: 0o600 });
+    await fs.promises.chmod(destination, 0o600);
+    return destination;
+  }
+
   async sendFile(method, chatId, filePath, caption) {
     const form = new FormData();
     form.set("chat_id", String(chatId));

@@ -20,10 +20,13 @@ const EXTRACTOR_ARGS = [
 
 const YOUTUBE_CLIENTS = ["mweb", "web_embedded", "android_vr"];
 
-function extractorArgs(url, youtubeClient) {
+function extractorArgs(url, youtubeClient, config) {
   const args = [...EXTRACTOR_ARGS];
   if (/(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname) && youtubeClient) {
     args.push("--extractor-args", `youtube:player_client=${youtubeClient}`);
+    if (config.youtubeCookiesPath && fs.existsSync(config.youtubeCookiesPath)) {
+      args.push("--cookies", config.youtubeCookiesPath);
+    }
   }
   return args;
 }
@@ -100,7 +103,7 @@ export async function inspectUrl(url, config) {
       try {
         const output = await run(config.ytDlpPath, [
           "--no-playlist", "--dump-single-json", "--no-warnings",
-          ...extractorArgs(url, client),
+          ...extractorArgs(url, client, config),
           "-f", "b/bv*+ba",
           "--", url
         ], { timeoutMs: 60_000 });
@@ -153,7 +156,7 @@ export async function download(url, kind, config) {
     let lastError;
     for (const client of clients) {
       try {
-        await run(config.ytDlpPath, [...common, ...extractorArgs(url, client), ...mediaArgs, "--", url]);
+        await run(config.ytDlpPath, [...common, ...extractorArgs(url, client, config), ...mediaArgs, "--", url]);
         completed = true;
         break;
       } catch (error) {

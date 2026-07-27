@@ -71,6 +71,25 @@ async function handleMessage(message) {
   const chatId = message.chat.id;
   const text = message.text?.trim() || "";
   removeExpiredSelections();
+  if (text === "/deletecookies") {
+    await fs.promises.rm(config.youtubeCookiesPath, { force: true });
+    await telegram.sendMessage(chatId, "✅ קובץ ה-Cookies של YouTube נמחק מהשרת.");
+    return;
+  }
+  if (message.document) {
+    if (message.document.file_name?.toLowerCase() !== "cookies.txt") {
+      await telegram.sendMessage(chatId, "❌ יש לשלוח קובץ בשם cookies.txt בלבד.");
+      return;
+    }
+    try {
+      await telegram.downloadFile(message.document.file_id, config.youtubeCookiesPath);
+      console.log(`YouTube cookies installed from Telegram file ${message.document.file_id}`);
+      await telegram.sendMessage(chatId, "✅ חשבון YouTube חובר. שלח עכשיו קישור YouTube לבדיקה.\nלמחיקה: /deletecookies");
+    } catch (error) {
+      await telegram.sendMessage(chatId, `❌ ${userFacingError(error)}`);
+    }
+    return;
+  }
   if (text === "/start" || text === "/help") {
     await telegram.sendMessage(chatId,
       `שלום! שלח לי קישור מ־YouTube, Instagram, Facebook, X/Twitter, TikTok או Vimeo ואציג אפשרויות הורדה.\n\n${TERMS}`);
