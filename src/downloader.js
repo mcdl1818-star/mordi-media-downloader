@@ -69,14 +69,39 @@ function run(command, args, { timeoutMs = 10 * 60_000 } = {}) {
   });
 }
 
+async function getVimeoConfig(url) {
+  const parsed = new URL(url);
+  const id = parsed.pathname.match(/(?:video\/)?(\d+)/)?.[1];
+  if (!id) throw new Error("לא ניתן לזהות את סרטון Vimeo.");
+  const response = await fetch(`https://player.vimeo.com/video/${id}/config`, {
+    headers: { "user-agent": "Mozilla/5.0", referer: url }
+  });
+  if (!response.ok) throw new Error("Vimeo חסם זמנית את הגישה לסרטון.");
+  return response.json();
+}
+
 export async function inspectUrl(url, config) {
-  const output = await run(config.ytDlpPath, [
-    "--no-playlist", "--dump-single-json", "--no-warnings",
-    ...EXTRACTOR_ARGS,
-    "-f", "b/bv*+ba",
-    "--", url
-  ], { timeoutMs: 60_000 });
-  const info = JSON.parse(output);
+  let info;
+  try {
+    const output = await run(config.ytDlpPath, [
+      "--no-playlist", "--dump-single-json", "--no-warnings",
+      ...EXTRACTOR_ARGS,
+      "-f", "b/bv*+ba",
+      "--", url
+    ], { timeoutMs: 60_000 });
+    info = JSON.parse(output);
+  } catch (error) {
+    if (!/(^|\.)vimeo\.com$/i.test(new URL(url).hostname)) throw error;
+    const vimeo = await getVimeoConfig(url);
+    info = {
+      id: String(vimeo.video?.id || ""),
+      extractor_key: "Vimeo",
+      title: vimeo.video?.title,
+      uploader: vimeo.video?.owner?.name,
+      duration: vimeo.video?.duration,
+      webpage_url: url
+    };
+  }
   return {
     id: info.id,
     extractor: info.extractor_key || info.extractor || "Generic",
@@ -101,7 +126,26 @@ export async function download(url, kind, config) {
   const mediaArgs = kind === "audio"
     ? ["-x", "--audio-format", "mp3", "--audio-quality", "5"]
     : ["-f", "bv*[height<=720]+ba/b[height<=720]/b", "--merge-output-format", "mp4"];
-  await run(config.ytDlpPath, [...common, ...mediaArgs, "--", url]);
+  try {
+    await run(config.ytDlpPath, [...common, ...mediaArgs, "--", url]);
+  } catch (error) {
+    if (!/(^|\.)vimeo\.com$/i.test(new URL(url).hostname)) throw error;
+    const vimeo = await getVimeoConfig(url);
+    const progressive = [...(vimeo.request?.files?.progressive || [])]
+      .filter(item => item.url)
+      .sort((a, b) => (b.height || 0) - (a.height || 0));
+    const selected = progressive.find(item => (item.height || 0) <= 720) || progressive.at(-1);
+    if (!selected) throw error;
+    const mediaResponse = await fetch(selected.url, { headers: { "user-agent": "Mozilla/5.0", referer: url } });
+    if (!mediaResponse.ok) throw new Error("Vimeo חסם זמנית את הורדת הסרטון.");
+    const sourcePath = path.join(jobDir, "vimeo-source.mp4");
+    await fs.promises.writeFile(sourcePath, Buffer.from(await mediaResponse.arrayBuffer()));
+    if (kind === "audio") {
+      const audioPath = path.join(jobDir, "vimeo-audio.mp3");
+      await run(config.ffmpegPath, ["-i", sourcePath, "-vn", "-c:a", "libmp3lame", "-q:a", "5", audioPath]);
+      await fs.promises.rm(sourcePath, { force: true });
+    }
+  }
   const files = (await fs.promises.readdir(jobDir))
     .filter(name => !name.endsWith(".part") && !name.endsWith(".ytdl"))
     .map(name => path.join(jobDir, name));
