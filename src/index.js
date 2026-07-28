@@ -5,6 +5,7 @@ import { Telegram } from "./telegram.js";
 import crypto from "node:crypto";
 import { extractSupportedMediaUrl, inspectUrl, download, downloadGallery, cleanupFile, assertFileSize, isYouTubeBlockedError } from "./downloader.js";
 import { downloadSelection, formatKeyboard } from "./formats.js";
+import { dispatchYouTubeWorker } from "./github-worker.js";
 
 const config = readConfig();
 const telegram = new Telegram(config.token);
@@ -179,6 +180,15 @@ async function processDownloadJob(job) {
     );
     await editStatus(job, `✅ הושלם ונשלח\n${progressBar(100)}`);
   } catch (error) {
+    if (job.platform === "YouTube" && isYouTubeBlockedError(error) && config.githubActionsToken) {
+      try {
+        await dispatchYouTubeWorker(job, config);
+        await editStatus(job, "☁️ Render נחסם. העברתי את ההורדה לשרת YouTube חלופי של GitHub; הקובץ יישלח כאן אוטומטית בסיום.");
+        return;
+      } catch (workerError) {
+        console.error("GitHub YouTube worker:", workerError.message);
+      }
+    }
     await editStatus(job, `❌ ${userFacingError(error)}`);
   } finally {
     if (job.platform === "YouTube") lastYouTubeJobFinishedAt = Date.now();
@@ -250,7 +260,7 @@ async function handleMessage(message) {
   }
   try {
     const { url, platform } = extractSupportedMediaUrl(text);
-    if (platform === "YouTube" && Date.now() < youtubeBlockedUntil) {
+    if (platform === "YouTube" && Date.now() < youtubeBlockedUntil && !config.githubActionsToken) {
       const minutes = Math.max(1, Math.ceil((youtubeBlockedUntil - Date.now()) / 60_000));
       await telegram.sendMessage(
         chatId,
@@ -270,14 +280,26 @@ async function handleMessage(message) {
     } catch (error) {
       if (platform === "YouTube" && isYouTubeBlockedError(error)) {
         youtubeBlockedUntil = Date.now() + 30 * 60_000;
+        if (config.githubActionsToken) {
+          info = {
+            title: "YouTube — הורדה דרך שרת חלופי",
+            channel: "YouTube",
+            duration: 0,
+            webpageUrl: url,
+            mediaKind: "video",
+            mediaCount: 1
+          };
+        }
       }
-      if (platform !== "Instagram") throw error;
-      info = {
-        title: "פוסט Instagram",
-        channel: "Instagram",
-        duration: 0,
-        webpageUrl: url
-      };
+      if (!info) {
+        if (platform !== "Instagram") throw error;
+        info = {
+          title: "פוסט Instagram",
+          channel: "Instagram",
+          duration: 0,
+          webpageUrl: url
+        };
+      }
     }
     const selectionId = crypto.randomBytes(8).toString("hex");
     pending.set(selectionId, {

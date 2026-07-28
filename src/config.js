@@ -38,6 +38,9 @@ export function readConfig() {
     youtubeCookiesPath: path.resolve("temp", "youtube-cookies.txt"),
     youtubeCookieFileId: process.env.YOUTUBE_COOKIE_FILE_ID?.trim() || "",
     youtubeProxyUrl: process.env.YOUTUBE_PROXY_URL?.trim() || "",
+    githubActionsToken: process.env.GITHUB_ACTIONS_TOKEN?.trim() || "",
+    githubActionsRepo: process.env.GITHUB_ACTIONS_REPO?.trim() || "mcdl1818-star/mordi-media-downloader",
+    githubActionsWorkflow: process.env.GITHUB_ACTIONS_WORKFLOW?.trim() || "youtube-worker.yml",
     port: Number(process.env.PORT) || 10000,
     webhookUrl: process.env.WEBHOOK_URL?.trim() || "",
     webhookSecret: process.env.WEBHOOK_SECRET?.trim() || ""

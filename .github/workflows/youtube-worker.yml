@@ -1,0 +1,156 @@
+name: YouTube fallback worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: YouTube URL
+        required: true
+        type: string
+      kind:
+        required: true
+        type: string
+      height:
+        required: true
+        default: "720"
+        type: string
+      audio_bitrate:
+        required: true
+        default: "128"
+        type: string
+      mute:
+        required: true
+        default: "false"
+        type: string
+      subtitles:
+        required: true
+        default: "false"
+        type: string
+      chat_id:
+        required: true
+        type: string
+      reply_to:
+        required: true
+        type: string
+      status_message_id:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SOURCE_URL: ${{ inputs.url }}
+      MEDIA_KIND: ${{ inputs.kind }}
+      MAX_HEIGHT: ${{ inputs.height }}
+      AUDIO_BITRATE: ${{ inputs.audio_bitrate }}
+      MUTE_VIDEO: ${{ inputs.mute }}
+      EMBED_SUBTITLES: ${{ inputs.subtitles }}
+      CHAT_ID: ${{ inputs.chat_id }}
+      REPLY_TO: ${{ inputs.reply_to }}
+      STATUS_MESSAGE_ID: ${{ inputs.status_message_id }}
+      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+    steps:
+      - name: Install media tools
+        run: |
+          python -m pip install --upgrade --pre "yt-dlp[default,curl-cffi]"
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Notify Telegram
+        run: |
+          curl --fail --silent --show-error \
+            -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "message_id=${STATUS_MESSAGE_ID}" \
+            --data-urlencode "text=☁️ שרת YouTube החלופי התחיל לעבד את הקישור..."
+
+      - name: Download and process
+        id: media
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          common=(
+            --no-playlist
+            --windows-filenames
+            --trim-filenames 100
+            --concurrent-fragments 8
+            --retries 5
+            --fragment-retries 8
+            --max-filesize 48M
+            --print-to-file after_move:filepath /tmp/final-path.txt
+            -o "output/%(title).80B [%(id)s].%(ext)s"
+          )
+
+          if [[ "${MEDIA_KIND}" == "audio" ]]; then
+            yt-dlp "${common[@]}" \
+              -f "ba/b" -x --audio-format mp3 --audio-quality "${AUDIO_BITRATE}K" \
+              --embed-metadata --embed-thumbnail --convert-thumbnails jpg \
+              -- "${SOURCE_URL}"
+          else
+            extra=()
+            if [[ "${EMBED_SUBTITLES}" == "true" ]]; then
+              extra+=(--write-subs --write-auto-subs --sub-langs "he.*,en.*" --sub-format "vtt/srt/best" --embed-subs)
+            fi
+            yt-dlp "${common[@]}" "${extra[@]}" \
+              -f "bv*[height<=${MAX_HEIGHT}][ext=mp4]+ba[ext=m4a]/bv*[height<=${MAX_HEIGHT}]+ba/b[height<=${MAX_HEIGHT}]" \
+              -S "vcodec:h264,acodec:aac" --embed-metadata \
+              --remux-video mp4 --merge-output-format mp4 \
+              -- "${SOURCE_URL}"
+          fi
+
+          media_file="$(tail -n 1 /tmp/final-path.txt)"
+          if [[ ! -f "${media_file}" ]]; then
+            media_file="$(find output -type f ! -name '*.part' | head -n 1)"
+          fi
+
+          if [[ "${MUTE_VIDEO}" == "true" ]]; then
+            ffmpeg -y -i "${media_file}" -map 0:v:0 -c:v copy -an -movflags +faststart output/muted.mp4
+            rm -f "${media_file}"
+            media_file="output/muted.mp4"
+          fi
+
+          size="$(stat -c %s "${media_file}")"
+          if (( size > 50331648 )); then
+            echo "Final file exceeds Telegram's configured 48MB limit" >&2
+            exit 1
+          fi
+          echo "file=${media_file}" >> "${GITHUB_OUTPUT}"
+
+      - name: Send result to Telegram
+        shell: bash
+        run: |
+          set -euo pipefail
+          method="sendVideo"
+          field="video"
+          if [[ "${MEDIA_KIND}" == "audio" ]]; then
+            method="sendAudio"
+            field="audio"
+          fi
+          reply_json="{\"message_id\":${REPLY_TO},\"allow_sending_without_reply\":true}"
+          curl --fail --silent --show-error \
+            -X POST "https://api.telegram.org/bot${BOT_TOKEN}/${method}" \
+            -F "chat_id=${CHAT_ID}" \
+            -F "${field}=@${{ steps.media.outputs.file }}" \
+            -F "caption=YouTube • הושלם בשרת החלופי" \
+            -F "reply_parameters=${reply_json}"
+          curl --fail --silent --show-error \
+            -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "message_id=${STATUS_MESSAGE_ID}" \
+            --data-urlencode "text=✅ הורדת YouTube הושלמה ונשלחה דרך השרת החלופי."
+
+      - name: Report failure
+        if: failure()
+        run: |
+          curl --silent --show-error \
+            -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "message_id=${STATUS_MESSAGE_ID}" \
+            --data-urlencode "text=❌ גם שרת YouTube החלופי נחסם או שהקובץ גדול מדי. נסה קישור אחר."

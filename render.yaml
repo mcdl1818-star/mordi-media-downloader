@@ -23,3 +23,9 @@ services:
         value: "30"
       - key: YOUTUBE_PROXY_URL
         sync: false
+      - key: GITHUB_ACTIONS_TOKEN
+        sync: false
+      - key: GITHUB_ACTIONS_REPO
+        value: mcdl1818-star/mordi-media-downloader
+      - key: GITHUB_ACTIONS_WORKFLOW
+        value: youtube-worker.yml
