@@ -1,13 +1,8 @@
 FROM node:24-bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip ca-certificates git \
-    && python3 -m pip install --no-cache-dir --break-system-packages --pre "yt-dlp[default,curl-cffi]" gallery-dl bgutil-ytdlp-pot-provider \
-    && git clone --depth 1 --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil \
-    && cd /opt/bgutil/server \
-    && npm ci \
-    && npx tsc \
-    && rm -rf /opt/bgutil/.git \
+    && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip ca-certificates chromium \
+    && python3 -m pip install --no-cache-dir --break-system-packages --pre "yt-dlp[default,curl-cffi]" gallery-dl yt-dlp-getpot-wpc \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -27,4 +22,4 @@ ENV NODE_ENV=production \
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "node /opt/bgutil/server/build/main.js >/tmp/bgutil-provider.log 2>&1 & sleep 1; exec node src/index.js"]
+CMD ["node", "src/index.js"]
