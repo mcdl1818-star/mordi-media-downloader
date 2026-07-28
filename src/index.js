@@ -237,6 +237,14 @@ async function startWebhook() {
 }
 
 await fs.promises.mkdir(config.tempDir, { recursive: true });
+if (config.youtubeCookieFileId && !fs.existsSync(config.youtubeCookiesPath)) {
+  try {
+    await telegram.downloadFile(config.youtubeCookieFileId, config.youtubeCookiesPath);
+    console.log("YouTube cookies restored from Telegram storage");
+  } catch (error) {
+    console.error("YouTube cookie restore:", error.message);
+  }
+}
 if (config.webhookUrl) {
   await startWebhook();
 } else {
