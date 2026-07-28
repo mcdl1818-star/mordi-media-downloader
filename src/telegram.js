@@ -1,5 +1,14 @@
 import fs from "node:fs";
 
+const TELEGRAM_CAPTION_LIMIT = 1024;
+
+export function fitTelegramCaption(caption, limit = TELEGRAM_CAPTION_LIMIT) {
+  const text = String(caption || "").trim();
+  const characters = Array.from(text);
+  if (characters.length <= limit) return text;
+  return `${characters.slice(0, Math.max(0, limit - 1)).join("").trimEnd()}…`;
+}
+
 export class Telegram {
   constructor(token) {
     this.baseUrl = `https://api.telegram.org/bot${token}`;
@@ -37,7 +46,7 @@ export class Telegram {
   async sendFile(method, chatId, filePath, caption) {
     const form = new FormData();
     form.set("chat_id", String(chatId));
-    form.set("caption", caption);
+    form.set("caption", fitTelegramCaption(caption));
     const bytes = await fs.promises.readFile(filePath);
     const fields = {
       sendAudio: "audio",
