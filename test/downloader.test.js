@@ -64,6 +64,7 @@ test("builds bounded video format selectors with a safe fallback", () => {
   assert.match(videoFormatForHeight(1080), /height<=1080/);
   assert.match(videoFormatForHeight(999), /height<=720/);
   assert.ok(videoFormatForHeight(480).endsWith("/worst[height<=480]"));
+  assert.match(videoFormatForHeight(720, { mute: true }), /^bv\[height<=720\]/);
 });
 
 test("uses account cookies only for content that actually requires authentication", () => {

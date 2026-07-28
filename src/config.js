@@ -28,6 +28,7 @@ export function readConfig() {
     allowedUserId,
     ytDlpPath: process.env.YT_DLP_PATH?.trim() || "yt-dlp",
     galleryDlPath: process.env.GALLERY_DL_PATH?.trim() || "gallery-dl",
+    aria2cPath: process.env.ARIA2C_PATH?.trim() || "aria2c",
     ffmpegPath: process.env.FFMPEG_PATH?.trim() || "ffmpeg",
     maxBytes: (Number(process.env.MAX_FILE_SIZE_MB) || 49) * 1024 * 1024,
     maxMediaItems: Math.max(1, Math.min(30, Number(process.env.MAX_MEDIA_ITEMS) || 15)),

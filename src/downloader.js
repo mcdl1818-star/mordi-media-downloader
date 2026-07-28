@@ -406,8 +406,16 @@ export async function inspectUrl(url, config) {
   };
 }
 
-export function videoFormatForHeight(maxHeight = 720) {
+export function videoFormatForHeight(maxHeight = 720, { mute = false } = {}) {
   const height = [360, 480, 720, 1080].includes(Number(maxHeight)) ? Number(maxHeight) : 720;
+  if (mute) {
+    return [
+      `bv[height<=${height}][ext=mp4]`,
+      `bv[height<=${height}]`,
+      `b[height<=${height}][ext=mp4]`,
+      `b[height<=${height}]`
+    ].join("/");
+  }
   return [
     `bv*[height<=${height}][ext=mp4]+ba[ext=m4a]`,
     `bv*[height<=${height}]+ba`,
@@ -417,12 +425,25 @@ export function videoFormatForHeight(maxHeight = 720) {
   ].join("/");
 }
 
-export async function download(url, kind, config, onProgress, { maxHeight = 720 } = {}) {
+export async function download(
+  url,
+  kind,
+  config,
+  onProgress,
+  {
+    maxHeight = 720,
+    audioFormat = "mp3",
+    audioBitrate = 128,
+    mute = false,
+    subtitles = false
+  } = {}
+) {
   await assertPublicUrl(url);
   await fs.promises.mkdir(config.tempDir, { recursive: true });
   const jobDir = path.join(config.tempDir, crypto.randomUUID());
   await fs.promises.mkdir(jobDir);
   const outputTemplate = path.join(jobDir, "%(title).80B [%(id)s].%(ext)s");
+  const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
   const common = [
     "--no-playlist", "--windows-filenames", "--trim-filenames", "120",
     "--concurrent-fragments", "8",
@@ -439,26 +460,48 @@ export async function download(url, kind, config, onProgress, { maxHeight = 720 
     "--ffmpeg-location", config.ffmpegPath,
     "-o", outputTemplate
   ];
+  if (!isYouTube && config.aria2cPath) {
+    common.push(
+      "--downloader", config.aria2cPath,
+      "--downloader", "dash,m3u8:native",
+      "--downloader-args", "aria2c:-x8 -s8 -k1M --file-allocation=none --console-log-level=warn"
+    );
+  }
   const mediaArgs = kind === "audio"
     ? [
         "-f",
-        "18/22/b[height<=360][ext=mp4]/ba/b",
+        "ba/b",
         "-x",
         "--audio-format",
-        "mp3",
+        audioFormat,
         "--audio-quality",
-        "5"
+        `${Math.max(64, Math.min(320, Number(audioBitrate) || 128))}K`,
+        "--embed-metadata",
+        "--embed-thumbnail",
+        "--convert-thumbnails",
+        "jpg"
       ]
     : [
         "-f",
-        videoFormatForHeight(maxHeight),
+        videoFormatForHeight(maxHeight, { mute }),
+        "-S",
+        "vcodec:h264,acodec:aac",
+        "--embed-metadata",
         "--remux-video",
         "mp4",
         "--merge-output-format",
         "mp4"
       ];
+  if (subtitles) {
+    mediaArgs.push(
+      "--write-subs",
+      "--write-auto-subs",
+      "--sub-langs", "he.*,en.*",
+      "--sub-format", "vtt/srt/best",
+      "--embed-subs"
+    );
+  }
   try {
-    const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
     const clients = isYouTube ? YOUTUBE_CLIENTS : [null];
     let completed = false;
     let lastError;
@@ -503,6 +546,22 @@ export async function download(url, kind, config, onProgress, { maxHeight = 720 
       await run(config.ffmpegPath, ["-i", sourcePath, "-vn", "-c:a", "libmp3lame", "-q:a", "5", audioPath]);
       await fs.promises.rm(sourcePath, { force: true });
     }
+  }
+  if (mute) {
+    const sourceName = (await fs.promises.readdir(jobDir))
+      .find(name => /\.(?:mp4|webm|mov|mkv|m4v)$/i.test(name) && !name.startsWith("muted."));
+    if (!sourceName) throw new Error("לא נמצא וידאו שניתן להמיר לגרסה ללא קול.");
+    const sourcePath = path.join(jobDir, sourceName);
+    const mutedPath = path.join(jobDir, "muted.mp4");
+    await run(config.ffmpegPath, [
+      "-y", "-i", sourcePath,
+      "-map", "0:v:0",
+      "-c:v", "copy",
+      "-an",
+      "-movflags", "+faststart",
+      mutedPath
+    ]);
+    await fs.promises.rm(sourcePath, { force: true });
   }
   const files = (await fs.promises.readdir(jobDir))
     .filter(name => !name.endsWith(".part") && !name.endsWith(".ytdl"))

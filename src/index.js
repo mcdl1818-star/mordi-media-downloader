@@ -134,7 +134,7 @@ async function processDownloadJob(job) {
     ].filter(Boolean).join(" • ");
     statusChain = statusChain.then(() => editStatus(
       job,
-      `${job.kind === "audio" ? "🎵 מכין MP3" : `🎬 מוריד וידאו ${job.label || "720p"}`}\n${progressBar(percent)}\n${details}`
+      `${job.kind === "audio" ? `🎵 מכין ${job.label || "MP3"}` : `🎬 מוריד וידאו ${job.label || "720p"}`}\n${progressBar(percent)}\n${details}`
     ));
   };
 
@@ -159,8 +159,14 @@ async function processDownloadJob(job) {
       return;
     }
 
-    await editStatus(job, `${job.kind === "audio" ? "🎵 מכין MP3" : `🎬 מתחיל הורדת וידאו ${job.label || "720p"}`}\n${progressBar(0)}`);
-    filePath = await download(job.url, job.kind, config, updateProgress, { maxHeight: job.height });
+    await editStatus(job, `${job.kind === "audio" ? `🎵 מכין ${job.label || "MP3"}` : `🎬 מתחיל הורדת וידאו ${job.label || "720p"}`}\n${progressBar(0)}`);
+    filePath = await download(job.url, job.kind, config, updateProgress, {
+      maxHeight: job.height,
+      audioFormat: job.audioFormat,
+      audioBitrate: job.audioBitrate,
+      mute: job.mute,
+      subtitles: job.subtitles
+    });
     await statusChain;
     await editStatus(job, `📤 ההורדה הסתיימה, שולח לטלגרם...\n${progressBar(100)}`);
     await assertFileSize(filePath, config.maxBytes);
