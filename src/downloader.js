@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { once } from "node:events";
 import dns from "node:dns/promises";
 import net from "node:net";
+import { inspectYouTubeInnertube, selectInnertubeStreams } from "./youtube-innertube.js";
 
 const PLATFORM_RULES = [
   ["YouTube", /(^|\.)youtube\.com$|^youtu\.be$/],
@@ -337,6 +338,90 @@ async function inspectPageMedia(url, config) {
   };
 }
 
+async function downloadYouTubeInnertube(
+  url,
+  kind,
+  config,
+  jobDir,
+  onProgress,
+  { maxHeight, audioBitrate }
+) {
+  const info = await inspectYouTubeInnertube(url);
+  const streams = selectInnertubeStreams(info.streamingData, maxHeight);
+  if (!streams.audio) throw new Error("Innertube לא החזיר זרם אודיו זמין.");
+  const requestOptions = {
+    headers: {
+      "user-agent": "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3 like Mac OS X)",
+      referer: "https://www.youtube.com/",
+      origin: "https://www.youtube.com"
+    }
+  };
+  const limit = config.maxBytes * 3;
+
+  if (kind === "audio") {
+    const sourcePath = path.join(jobDir, "innertube-audio-source.m4a");
+    const response = await safeFetch(streams.audio.url, requestOptions);
+    if (!response.ok) throw new Error(`Innertube audio HTTP ${response.status}`);
+    await writeResponseToFile(response, sourcePath, onProgress, limit);
+    const outputPath = path.join(jobDir, "innertube-audio.mp3");
+    await run(config.ffmpegPath, [
+      "-y", "-i", sourcePath,
+      "-vn",
+      "-c:a", "libmp3lame",
+      "-b:a", `${Math.max(64, Math.min(320, Number(audioBitrate) || 128))}k`,
+      "-metadata", `title=${info.title}`,
+      "-metadata", `artist=${info.channel}`,
+      outputPath
+    ]);
+    await fs.promises.rm(sourcePath, { force: true });
+    return;
+  }
+
+  if (!streams.video) throw new Error("Innertube לא החזיר זרם וידאו זמין.");
+  const videoPath = path.join(jobDir, "innertube-video-source.mp4");
+  const audioPath = path.join(jobDir, "innertube-audio-source.m4a");
+  let videoProgress = 0;
+  let audioProgress = 0;
+  const reportCombined = type => progress => {
+    if (type === "video") videoProgress = progress.percent;
+    else audioProgress = progress.percent;
+    return onProgress?.({
+      percent: (videoProgress + audioProgress) / 2,
+      speed: progress.speed,
+      eta: progress.eta
+    });
+  };
+  const [videoResponse, audioResponse] = await Promise.all([
+    safeFetch(streams.video.url, requestOptions),
+    safeFetch(streams.audio.url, requestOptions)
+  ]);
+  if (!videoResponse.ok || !audioResponse.ok) {
+    throw new Error(`Innertube streams HTTP ${videoResponse.status}/${audioResponse.status}`);
+  }
+  await Promise.all([
+    writeResponseToFile(videoResponse, videoPath, reportCombined("video"), limit),
+    writeResponseToFile(audioResponse, audioPath, reportCombined("audio"), limit)
+  ]);
+  const outputPath = path.join(jobDir, "innertube-video.mp4");
+  await run(config.ffmpegPath, [
+    "-y",
+    "-i", videoPath,
+    "-i", audioPath,
+    "-map", "0:v:0",
+    "-map", "1:a:0",
+    "-c:v", "copy",
+    "-c:a", "aac",
+    "-movflags", "+faststart",
+    "-metadata", `title=${info.title}`,
+    "-metadata", `artist=${info.channel}`,
+    outputPath
+  ]);
+  await Promise.all([
+    fs.promises.rm(videoPath, { force: true }),
+    fs.promises.rm(audioPath, { force: true })
+  ]);
+}
+
 export function isLikelyDirectMediaUrl(input) {
   try {
     return /\.(?:jpe?g|png|webp|gif|avif|svg|mp4|webm|mov|m4v|mp3|m4a|ogg|wav)(?:$|[?#])/i
@@ -380,7 +465,19 @@ export async function inspectUrl(url, config) {
     }
     if (!info) throw lastError;
   } catch (error) {
-    if (/(^|\.)vimeo\.com$/i.test(new URL(url).hostname)) {
+    if (/(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname)) {
+      const innertube = await inspectYouTubeInnertube(url);
+      return {
+        id: innertube.id,
+        extractor: "YouTube/Innertube",
+        title: innertube.title,
+        channel: innertube.channel,
+        duration: innertube.duration,
+        webpageUrl: url,
+        mediaKind: "video",
+        mediaCount: 1
+      };
+    } else if (/(^|\.)vimeo\.com$/i.test(new URL(url).hostname)) {
       const vimeo = await getVimeoConfig(url);
       info = {
         id: String(vimeo.video?.id || ""),
@@ -528,6 +625,19 @@ export async function download(
         }
       }
       if (completed) break;
+    }
+    if (!completed && isYouTube) {
+      try {
+        await downloadYouTubeInnertube(url, kind, config, jobDir, onProgress, {
+          maxHeight,
+          audioBitrate
+        });
+        completed = true;
+      } catch (innertubeError) {
+        throw new Error(
+          `${String(lastError?.message || "yt-dlp failed")}\nInnertube fallback: ${String(innertubeError?.message || innertubeError)}`
+        );
+      }
     }
     if (!completed) throw lastError;
   } catch (error) {

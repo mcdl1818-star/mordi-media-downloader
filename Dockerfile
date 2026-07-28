@@ -13,6 +13,8 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY package.json ./
+COPY package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 COPY src ./src
 
 RUN useradd --create-home --uid 10001 bot \
