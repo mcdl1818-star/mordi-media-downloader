@@ -93,6 +93,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          exec 2> >(tee -a /tmp/youtube-worker-error.log >&2)
           mkdir -p output
           common=(
             --no-playlist
@@ -178,6 +179,18 @@ jobs:
       - name: Report failure
         if: failure()
         run: |
+          failure_text="❌ שרת YouTube החלופי לא הצליח להוריד את הסרטון."
+          if grep -qi "cookies are no longer valid" /tmp/youtube-worker-error.log 2>/dev/null; then
+            failure_text="❌ YouTube ביטל את אימות החשבון הזמני. נדרש קובץ cookies חדש."
+          elif grep -Eqi "max-filesize|exceeds Telegram|File is larger" /tmp/youtube-worker-error.log 2>/dev/null; then
+            failure_text="❌ הקובץ גדול ממגבלת השליחה של Telegram. נסה איכות נמוכה יותר."
+          fi
+          curl --silent --show-error \
+            -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "message_id=${STATUS_MESSAGE_ID}" \
+            --data-urlencode "text=${failure_text}"
+          exit 0
           curl --silent --show-error \
             -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
             -d "chat_id=${CHAT_ID}" \
