@@ -87,12 +87,21 @@ function run(command, args, { timeoutMs = 10 * 60_000, onProgress } = {}) {
     const child = spawn(command, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let stdoutLineBuffer = "";
     let stderrLineBuffer = "";
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error("הפעולה ארכה יותר מדי זמן ונעצרה."));
     }, timeoutMs);
-    child.stdout.on("data", chunk => { stdout += chunk; });
+    child.stdout.on("data", chunk => {
+      const text = String(chunk);
+      stdout += text;
+      if (!onProgress) return;
+      stdoutLineBuffer += text;
+      const lines = stdoutLineBuffer.split(/\r?\n/);
+      stdoutLineBuffer = lines.pop() || "";
+      for (const line of lines) parseProgressLine(line, onProgress);
+    });
     child.stderr.on("data", chunk => {
       const text = String(chunk);
       stderr = (stderr + text).slice(-5000);
@@ -107,6 +116,8 @@ function run(command, args, { timeoutMs = 10 * 60_000, onProgress } = {}) {
     });
     child.on("close", code => {
       clearTimeout(timer);
+      parseProgressLine(stdoutLineBuffer, onProgress);
+      parseProgressLine(stderrLineBuffer, onProgress);
       code === 0 ? resolve(stdout) : reject(new Error(stderr.trim() || `${command} הסתיים בקוד ${code}`));
     });
   });
