@@ -180,7 +180,11 @@ async function processDownloadJob(job) {
     );
     await editStatus(job, `✅ הושלם ונשלח\n${progressBar(100)}`);
   } catch (error) {
-    if (job.platform === "YouTube" && isYouTubeBlockedError(error) && config.githubActionsToken) {
+    // Render's YouTube failures are not always reported as an explicit bot/IP
+    // block (format, cookie and player errors can be the same restriction).
+    // The authenticated GitHub worker is the reliable final fallback for every
+    // YouTube download failure.
+    if (job.platform === "YouTube" && config.githubActionsToken) {
       try {
         await dispatchYouTubeWorker(job, config);
         await editStatus(job, "☁️ Render נחסם. העברתי את ההורדה לשרת YouTube חלופי של GitHub; הקובץ יישלח כאן אוטומטית בסיום.");
