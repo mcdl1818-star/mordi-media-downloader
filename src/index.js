@@ -375,7 +375,7 @@ async function startWebhook() {
   const server = http.createServer((request, response) => {
     if (request.method === "GET" && request.url === "/") {
       response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-      response.end("Mordi Media Downloader is running");
+      response.end(`Mordi Media Downloader is running\nversion=${process.env.RENDER_GIT_COMMIT || "development"}`);
       return;
     }
     if (request.method !== "POST" || request.url !== webhookPath) {
