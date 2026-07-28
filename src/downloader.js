@@ -143,12 +143,21 @@ export async function download(url, kind, config) {
   const outputTemplate = path.join(jobDir, "%(title).80B [%(id)s].%(ext)s");
   const common = [
     "--no-playlist", "--windows-filenames", "--trim-filenames", "120",
+    "--concurrent-fragments", "4",
+    "--socket-timeout", "20",
+    "--retries", "3",
+    "--fragment-retries", "3",
     "--ffmpeg-location", config.ffmpegPath,
     "-o", outputTemplate
   ];
   const mediaArgs = kind === "audio"
     ? ["-x", "--audio-format", "mp3", "--audio-quality", "5"]
-    : ["-f", "bv*[height<=720]+ba/b[height<=720]/b", "--merge-output-format", "mp4"];
+    : [
+        "-f",
+        "22/18/b[height<=720][ext=mp4]/bv*[height<=720]+ba/b[height<=720]/b",
+        "--merge-output-format",
+        "mp4"
+      ];
   try {
     const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
     const clients = isYouTube ? YOUTUBE_CLIENTS : [null];
