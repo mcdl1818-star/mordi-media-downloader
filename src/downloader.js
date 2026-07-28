@@ -123,6 +123,41 @@ async function getVimeoConfig(url) {
   return response.json();
 }
 
+function formatTransferSpeed(bytesPerSecond) {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return "";
+  if (bytesPerSecond >= 1024 * 1024) return `${(bytesPerSecond / 1024 / 1024).toFixed(1)} MiB/s`;
+  return `${Math.round(bytesPerSecond / 1024)} KiB/s`;
+}
+
+async function writeResponseToFile(response, destination, onProgress) {
+  const total = Number(response.headers.get("content-length")) || 0;
+  if (!response.body) {
+    await fs.promises.writeFile(destination, Buffer.from(await response.arrayBuffer()));
+    return;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  const startedAt = Date.now();
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(Buffer.from(value));
+    received += value.byteLength;
+    if (total && onProgress) {
+      const elapsedSeconds = Math.max(0.1, (Date.now() - startedAt) / 1000);
+      const speedBytes = received / elapsedSeconds;
+      const remainingSeconds = speedBytes > 0 ? Math.max(0, Math.round((total - received) / speedBytes)) : 0;
+      await onProgress({
+        percent: (received / total) * 100,
+        speed: formatTransferSpeed(speedBytes),
+        eta: remainingSeconds ? `${remainingSeconds}s` : ""
+      });
+    }
+  }
+  await fs.promises.writeFile(destination, Buffer.concat(chunks));
+}
+
 export async function inspectUrl(url, config) {
   let info;
   try {
@@ -231,7 +266,7 @@ export async function download(url, kind, config, onProgress) {
     const mediaResponse = await fetch(selected.url, { headers: { "user-agent": "Mozilla/5.0", referer: url } });
     if (!mediaResponse.ok) throw new Error("Vimeo חסם זמנית את הורדת הסרטון.");
     const sourcePath = path.join(jobDir, "vimeo-source.mp4");
-    await fs.promises.writeFile(sourcePath, Buffer.from(await mediaResponse.arrayBuffer()));
+    await writeResponseToFile(mediaResponse, sourcePath, onProgress);
     if (kind === "audio") {
       const audioPath = path.join(jobDir, "vimeo-audio.mp3");
       await run(config.ffmpegPath, ["-i", sourcePath, "-vn", "-c:a", "libmp3lame", "-q:a", "5", audioPath]);
