@@ -18,15 +18,23 @@ const EXTRACTOR_ARGS = [
   "--extractor-args", "twitter:api=syndication"
 ];
 
-const YOUTUBE_CLIENTS = ["mweb", "web_embedded", "android_vr"];
+// Retrying the same video through several YouTube clients multiplies requests and
+// can flag an authenticated session very quickly. mweb is the client recommended
+// for the PO-token provider installed in the container.
+const YOUTUBE_CLIENTS = ["mweb"];
 
 function extractorArgs(url, youtubeClient, config) {
   const args = [...EXTRACTOR_ARGS];
-  if (/(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname) && youtubeClient) {
+  const hostname = new URL(url).hostname;
+  if (/(^|\.)youtube\.com$|^youtu\.be$/i.test(hostname) && youtubeClient) {
     args.push("--extractor-args", `youtube:player_client=${youtubeClient}`);
+    args.push("--sleep-requests", "1", "--retry-sleep", "http:exp=1:10");
     if (config.youtubeCookiesPath && fs.existsSync(config.youtubeCookiesPath)) {
       args.push("--cookies", config.youtubeCookiesPath);
     }
+  }
+  if (/(^|\.)facebook\.com$|^fb\.watch$/i.test(hostname)) {
+    args.push("--impersonate", "chrome");
   }
   return args;
 }
@@ -60,17 +68,39 @@ export function extractSupportedMediaUrl(input) {
 
 export const validateYouTubeUrl = input => validateMediaUrl(input).url;
 
-function run(command, args, { timeoutMs = 10 * 60_000 } = {}) {
+function parseProgressLine(line, onProgress) {
+  const marker = "__PROGRESS__";
+  const start = line.indexOf(marker);
+  if (start === -1 || !onProgress) return;
+  const [percentText = "", speed = "", eta = ""] = line.slice(start + marker.length).trim().split("|");
+  const percent = Number.parseFloat(percentText.replace(/[^\d.]/g, ""));
+  if (!Number.isFinite(percent)) return;
+  Promise.resolve(onProgress({
+    percent: Math.max(0, Math.min(100, percent)),
+    speed: speed.trim(),
+    eta: eta.trim()
+  })).catch(() => {});
+}
+
+function run(command, args, { timeoutMs = 10 * 60_000, onProgress } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let stderrLineBuffer = "";
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error("הפעולה ארכה יותר מדי זמן ונעצרה."));
     }, timeoutMs);
     child.stdout.on("data", chunk => { stdout += chunk; });
-    child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-5000); });
+    child.stderr.on("data", chunk => {
+      const text = String(chunk);
+      stderr = (stderr + text).slice(-5000);
+      stderrLineBuffer += text;
+      const lines = stderrLineBuffer.split(/\r?\n/);
+      stderrLineBuffer = lines.pop() || "";
+      for (const line of lines) parseProgressLine(line, onProgress);
+    });
     child.on("error", error => {
       clearTimeout(timer);
       reject(new Error(`לא ניתן להפעיל ${command}: ${error.message}`));
@@ -136,17 +166,21 @@ export async function inspectUrl(url, config) {
   };
 }
 
-export async function download(url, kind, config) {
+export async function download(url, kind, config, onProgress) {
   await fs.promises.mkdir(config.tempDir, { recursive: true });
   const jobDir = path.join(config.tempDir, crypto.randomUUID());
   await fs.promises.mkdir(jobDir);
   const outputTemplate = path.join(jobDir, "%(title).80B [%(id)s].%(ext)s");
   const common = [
     "--no-playlist", "--windows-filenames", "--trim-filenames", "120",
-    "--concurrent-fragments", "4",
+    "--concurrent-fragments", "2",
     "--socket-timeout", "20",
     "--retries", "3",
     "--fragment-retries", "3",
+    "--newline",
+    "--progress",
+    "--progress-delta", "1",
+    "--progress-template", "download:__PROGRESS__%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
     "--ffmpeg-location", config.ffmpegPath,
     "-o", outputTemplate
   ];
@@ -169,11 +203,16 @@ export async function download(url, kind, config) {
   try {
     const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
     const clients = isYouTube ? YOUTUBE_CLIENTS : [null];
+    const pacingArgs = isYouTube ? ["--sleep-interval", "5", "--max-sleep-interval", "9"] : [];
     let completed = false;
     let lastError;
     for (const client of clients) {
       try {
-        await run(config.ytDlpPath, [...common, ...extractorArgs(url, client, config), ...mediaArgs, "--", url]);
+        await run(
+          config.ytDlpPath,
+          [...common, ...pacingArgs, ...extractorArgs(url, client, config), ...mediaArgs, "--", url],
+          { onProgress }
+        );
         completed = true;
         break;
       } catch (error) {

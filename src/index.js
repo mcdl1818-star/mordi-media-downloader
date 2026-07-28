@@ -8,7 +8,10 @@ import { extractSupportedMediaUrl, inspectUrl, download, downloadGallery, cleanu
 const config = readConfig();
 const telegram = new Telegram(config.token);
 const pending = new Map();
-const busyUsers = new Set();
+const downloadQueue = [];
+let queueRunning = false;
+let currentJob = null;
+let lastYouTubeJobFinishedAt = 0;
 let offset = 0;
 
 const TERMS = "לשימוש אישי ולימודי בלבד. יש להוריד רק תוכן שבבעלותך או שקיבלת הרשאה מפורשת לשמור.";
@@ -55,6 +58,123 @@ function userFacingError(error) {
   return message.length <= 220 ? message : "ההורדה נכשלה בגלל מגבלה זמנית של האתר. נסה שוב מאוחר יותר.";
 }
 
+function progressBar(percent) {
+  const value = Math.max(0, Math.min(100, Math.round(percent)));
+  const filled = Math.round(value / 5);
+  return `${"█".repeat(filled)}${"░".repeat(20 - filled)} ${value}%`;
+}
+
+function queuePositionText(position) {
+  return position === 1
+    ? "ההורדה תתחיל מיד בסיום הסרטון הנוכחי."
+    : `מיקום בתור: ${position}`;
+}
+
+async function editStatus(job, text) {
+  if (!job.statusMessageId) return;
+  try {
+    await telegram.call("editMessageText", {
+      chat_id: job.chatId,
+      message_id: job.statusMessageId,
+      text
+    });
+  } catch (error) {
+    if (!/message is not modified/i.test(String(error?.message || ""))) {
+      console.error("Status update:", error.message);
+    }
+  }
+}
+
+function enqueueDownload(job) {
+  const queued = Boolean(currentJob || queueRunning || downloadQueue.length);
+  downloadQueue.push(job);
+  const position = queued ? downloadQueue.length : 0;
+  void processDownloadQueue();
+  return { position, queued };
+}
+
+async function waitForYouTubePacing(job) {
+  if (job.platform !== "YouTube" || !lastYouTubeJobFinishedAt) return;
+  const remaining = 10_000 - (Date.now() - lastYouTubeJobFinishedAt);
+  if (remaining <= 0) return;
+  await editStatus(job, `🛡️ ממתין ${Math.ceil(remaining / 1000)} שניות בין בקשות YouTube כדי להגן על החשבון...`);
+  await new Promise(resolve => setTimeout(resolve, remaining));
+}
+
+async function processDownloadJob(job) {
+  let filePath;
+  const startedAt = Date.now();
+  let lastProgressAt = 0;
+  let lastProgress = -1;
+  let statusChain = Promise.resolve();
+  const updateProgress = ({ percent, speed, eta }) => {
+    const now = Date.now();
+    if (percent < 100 && now - lastProgressAt < 3000 && percent - lastProgress < 2) return;
+    lastProgressAt = now;
+    lastProgress = percent;
+    const elapsed = Math.max(1, Math.round((now - startedAt) / 1000));
+    const details = [
+      speed && speed !== "N/A" ? `מהירות: ${speed}` : "",
+      eta && eta !== "N/A" ? `נותרו: ${eta}` : "",
+      `זמן: ${elapsed} שנ׳`
+    ].filter(Boolean).join(" • ");
+    statusChain = statusChain.then(() => editStatus(
+      job,
+      `${job.kind === "audio" ? "🎵 מכין MP3" : "🎬 מוריד וידאו"}\n${progressBar(percent)}\n${details}`
+    ));
+  };
+
+  try {
+    await waitForYouTubePacing(job);
+    if (job.kind === "gallery") {
+      await editStatus(job, "🖼 אוסף את כל המדיה מהפוסט...");
+      const files = await downloadGallery(job.url, config);
+      for (let index = 0; index < files.length; index += 1) {
+        filePath = files[index];
+        await editStatus(job, `📤 שולח קובץ ${index + 1}/${files.length}\n${progressBar(((index + 1) / files.length) * 100)}`);
+        await assertFileSize(filePath, config.maxBytes);
+        await telegram.sendFile("sendDocument", job.chatId, filePath, `${job.title} • ${index + 1}/${files.length}`);
+      }
+      await editStatus(job, `✅ הושלם: ${files.length} קבצים נשלחו.`);
+      return;
+    }
+
+    await editStatus(job, `${job.kind === "audio" ? "🎵 מכין MP3" : "🎬 מתחיל הורדת וידאו"}\n${progressBar(0)}`);
+    filePath = await download(job.url, job.kind, config, updateProgress);
+    await statusChain;
+    await editStatus(job, `📤 ההורדה הסתיימה, שולח לטלגרם...\n${progressBar(100)}`);
+    await assertFileSize(filePath, config.maxBytes);
+    await telegram.sendFile(job.kind === "audio" ? "sendAudio" : "sendVideo", job.chatId, filePath, job.title);
+    await editStatus(job, `✅ הושלם ונשלח\n${progressBar(100)}`);
+  } catch (error) {
+    await editStatus(job, `❌ ${userFacingError(error)}`);
+  } finally {
+    if (job.platform === "YouTube") lastYouTubeJobFinishedAt = Date.now();
+    if (filePath) await cleanupFile(filePath).catch(console.error);
+  }
+}
+
+async function processDownloadQueue() {
+  if (queueRunning) return;
+  queueRunning = true;
+  try {
+    while (downloadQueue.length) {
+      currentJob = downloadQueue.shift();
+      await processDownloadJob(currentJob);
+      currentJob = null;
+      for (let index = 0; index < downloadQueue.length; index += 1) {
+        await editStatus(
+          downloadQueue[index],
+          `⏳ סרטון אחר נמצא באמצע הורדה.\n${queuePositionText(index + 1)}`
+        );
+      }
+    }
+  } finally {
+    currentJob = null;
+    queueRunning = false;
+  }
+}
+
 function removeExpiredSelections() {
   const now = Date.now();
   for (const [id, item] of pending) {
@@ -97,6 +217,26 @@ async function handleMessage(message) {
   }
   try {
     const { url, platform } = extractSupportedMediaUrl(text);
+    if (queueRunning || downloadQueue.length) {
+      const isInstagramGallery = platform === "Instagram" && !new URL(url).pathname.startsWith("/reel/");
+      const queuedStatus = await telegram.sendMessage(
+        chatId,
+        "⏳ סרטון אחר נמצא באמצע הורדה. הקישור נשמר בתור..."
+      );
+      const queued = enqueueDownload({
+        url,
+        title: platform,
+        platform,
+        kind: isInstagramGallery ? "gallery" : "video",
+        chatId,
+        statusMessageId: queuedStatus.message_id
+      });
+      await editStatus(
+        { chatId, statusMessageId: queuedStatus.message_id },
+        `⏳ סרטון אחר נמצא באמצע הורדה.\n${queuePositionText(queued.position || 1)}`
+      );
+      return;
+    }
     const status = await telegram.sendMessage(chatId, "🔎 בודק את הקישור...");
     let info;
     try {
@@ -132,33 +272,28 @@ async function handleCallback(query) {
     await telegram.answerCallbackQuery(query.id, "הבחירה פגה. שלח את הקישור מחדש.");
     return;
   }
-  if (busyUsers.has(userId)) {
-    await telegram.answerCallbackQuery(query.id, "כבר מתבצעת הורדה. המתן לסיומה.");
-    return;
-  }
-  await telegram.answerCallbackQuery(query.id, "ההורדה התחילה");
-  busyUsers.add(userId);
-  let filePath;
-  try {
-    if (kind === "gallery") {
-      await telegram.sendMessage(query.message.chat.id, "🖼 מוריד את כל התמונות והסרטונים מהפוסט...");
-      const files = await downloadGallery(item.url, config);
-      for (let index = 0; index < files.length; index += 1) {
-        filePath = files[index];
-        await assertFileSize(filePath, config.maxBytes);
-        await telegram.sendFile("sendDocument", query.message.chat.id, filePath, `${item.title} • ${index + 1}/${files.length}`);
-      }
-      return;
-    }
-    await telegram.sendMessage(query.message.chat.id, kind === "audio" ? "🎵 מכין MP3..." : "🎬 מוריד וממזג וידאו...");
-    filePath = await download(item.url, kind, config);
-    await assertFileSize(filePath, config.maxBytes);
-    await telegram.sendFile(kind === "audio" ? "sendAudio" : "sendVideo", query.message.chat.id, filePath, item.title);
-  } catch (error) {
-    await telegram.sendMessage(query.message.chat.id, `❌ ${userFacingError(error)}`);
-  } finally {
-    busyUsers.delete(userId);
-    if (filePath) await cleanupFile(filePath).catch(console.error);
+  pending.delete(id);
+  const status = await telegram.sendMessage(
+    query.message.chat.id,
+    queueRunning || downloadQueue.length
+      ? "⏳ סרטון אחר נמצא באמצע הורדה. הבקשה נשמרת בתור..."
+      : "⏳ מכין את ההורדה..."
+  );
+  const queued = enqueueDownload({
+    ...item,
+    kind,
+    chatId: query.message.chat.id,
+    statusMessageId: status.message_id
+  });
+  await telegram.answerCallbackQuery(
+    query.id,
+    queued.queued ? `נשמר בתור — מיקום ${queued.position}` : "ההורדה התחילה"
+  );
+  if (queued.queued) {
+    await editStatus(
+      { chatId: query.message.chat.id, statusMessageId: status.message_id },
+      `⏳ סרטון אחר נמצא באמצע הורדה.\n${queuePositionText(queued.position)}`
+    );
   }
 }
 
