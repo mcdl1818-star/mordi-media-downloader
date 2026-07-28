@@ -17,3 +17,5 @@ services:
         value: "49"
       - key: TEMP_TTL_MINUTES
         value: "30"
+      - key: YOUTUBE_PROXY_URL
+        sync: false

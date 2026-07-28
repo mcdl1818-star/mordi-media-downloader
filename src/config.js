@@ -34,6 +34,7 @@ export function readConfig() {
     tempDir: path.resolve("temp"),
     youtubeCookiesPath: path.resolve("temp", "youtube-cookies.txt"),
     youtubeCookieFileId: process.env.YOUTUBE_COOKIE_FILE_ID?.trim() || "",
+    youtubeProxyUrl: process.env.YOUTUBE_PROXY_URL?.trim() || "",
     port: Number(process.env.PORT) || 10000,
     webhookUrl: process.env.WEBHOOK_URL?.trim() || "",
     webhookSecret: process.env.WEBHOOK_SECRET?.trim() || ""

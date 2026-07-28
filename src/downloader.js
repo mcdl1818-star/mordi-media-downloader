@@ -30,6 +30,7 @@ function extractorArgs(url, youtubeClient, config, useYouTubeCookies = true) {
   if (/(^|\.)youtube\.com$|^youtu\.be$/i.test(hostname) && youtubeClient) {
     args.push("--extractor-args", `youtube:player_client=${youtubeClient}`);
     args.push("--sleep-requests", "1", "--retry-sleep", "http:exp=1:10");
+    if (config.youtubeProxyUrl) args.push("--proxy", config.youtubeProxyUrl);
     if (useYouTubeCookies && config.youtubeCookiesPath && fs.existsSync(config.youtubeCookiesPath)) {
       args.push("--cookies", config.youtubeCookiesPath);
     }
