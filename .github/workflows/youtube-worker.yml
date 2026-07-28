@@ -64,9 +64,14 @@ jobs:
 
       - name: Install media tools
         run: |
-          python -m pip install --upgrade --pre "yt-dlp[default,curl-cffi]"
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo curl --fail --silent --show-error --location \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux \
+            --output /usr/local/bin/yt-dlp
+          sudo chmod 755 /usr/local/bin/yt-dlp
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
 
       - name: Restore YouTube authentication
         run: |
@@ -93,31 +98,40 @@ jobs:
             --no-playlist
             --windows-filenames
             --trim-filenames 100
-            --concurrent-fragments 8
-            --retries 5
-            --fragment-retries 8
+            --concurrent-fragments 12
+            --retries 3
+            --fragment-retries 5
             --max-filesize 48M
-            --cookies /tmp/youtube-cookies.txt
             --js-runtimes node
             --print-to-file after_move:filepath /tmp/final-path.txt
             -o "output/%(title).80B [%(id)s].%(ext)s"
           )
 
-          if [[ "${MEDIA_KIND}" == "audio" ]]; then
-            yt-dlp "${common[@]}" \
-              -f "ba/b" -x --audio-format mp3 --audio-quality "${AUDIO_BITRATE}K" \
-              --embed-metadata --embed-thumbnail --convert-thumbnails jpg \
-              -- "${SOURCE_URL}"
-          else
-            extra=()
-            if [[ "${EMBED_SUBTITLES}" == "true" ]]; then
-              extra+=(--write-subs --write-auto-subs --sub-langs "he.*,en.*" --sub-format "vtt/srt/best" --embed-subs)
+          download_media() {
+            local -a auth_args=("$@")
+            rm -f /tmp/final-path.txt
+            if [[ "${MEDIA_KIND}" == "audio" ]]; then
+              yt-dlp "${common[@]}" "${auth_args[@]}" \
+                -f "ba/b" -x --audio-format mp3 --audio-quality "${AUDIO_BITRATE}K" \
+                --embed-metadata -- "${SOURCE_URL}"
+            else
+              local -a extra=()
+              if [[ "${EMBED_SUBTITLES}" == "true" ]]; then
+                extra+=(--write-subs --write-auto-subs --sub-langs "he.*,en.*" --sub-format "vtt/srt/best" --embed-subs)
+              fi
+              yt-dlp "${common[@]}" "${auth_args[@]}" "${extra[@]}" \
+                -f "bv*[height<=${MAX_HEIGHT}][ext=mp4]+ba[ext=m4a]/bv*[height<=${MAX_HEIGHT}]+ba/b[height<=${MAX_HEIGHT}]" \
+                -S "vcodec:h264,acodec:aac" --embed-metadata \
+                --remux-video mp4 --merge-output-format mp4 \
+                -- "${SOURCE_URL}"
             fi
-            yt-dlp "${common[@]}" "${extra[@]}" \
-              -f "bv*[height<=${MAX_HEIGHT}][ext=mp4]+ba[ext=m4a]/bv*[height<=${MAX_HEIGHT}]+ba/b[height<=${MAX_HEIGHT}]" \
-              -S "vcodec:h264,acodec:aac" --embed-metadata \
-              --remux-video mp4 --merge-output-format mp4 \
-              -- "${SOURCE_URL}"
+          }
+
+          # Avoid using account cookies when a public client works. This makes
+          # successful public downloads faster and reduces cookie rotation.
+          if ! download_media --extractor-args "youtube:player_client=mweb,web_safari,android_vr"; then
+            rm -rf output/*
+            download_media --cookies /tmp/youtube-cookies.txt
           fi
 
           media_file="$(tail -n 1 /tmp/final-path.txt)"

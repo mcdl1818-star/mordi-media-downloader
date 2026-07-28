@@ -140,7 +140,6 @@ async function processDownloadJob(job) {
   };
 
   try {
-    await waitForYouTubePacing(job);
     if (job.kind === "gallery") {
       await editStatus(job, "🖼 מאתר ומוריד את כל המדיה מהקישור...");
       const files = await downloadGallery(job.url, config);
@@ -161,6 +160,14 @@ async function processDownloadJob(job) {
     }
 
     await editStatus(job, `${job.kind === "audio" ? `🎵 מכין ${job.label || "MP3"}` : `🎬 מתחיל הורדת וידאו ${job.label || "720p"}`}\n${progressBar(0)}`);
+    if (job.platform === "YouTube" && config.githubActionsToken) {
+      await editStatus(job, "☁️ מעביר מיד לשרת YouTube החלופי המהיר...");
+      await dispatchYouTubeWorker(job, config);
+      await editStatus(job, "☁️ שרת YouTube החלופי התחיל לעבוד; הקובץ יישלח כאן אוטומטית בסיום.");
+      return;
+    }
+
+    await waitForYouTubePacing(job);
     filePath = await download(job.url, job.kind, config, updateProgress, {
       maxHeight: job.height,
       audioFormat: job.audioFormat,
@@ -279,7 +286,16 @@ async function handleMessage(message) {
       replyExtra(message.message_id)
     );
     let info;
-    try {
+    if (platform === "YouTube" && config.githubActionsToken) {
+      info = {
+        title: "YouTube — הורדה דרך שרת חלופי מהיר",
+        channel: "YouTube",
+        duration: 0,
+        webpageUrl: url,
+        mediaKind: "video",
+        mediaCount: 1
+      };
+    } else try {
       info = await inspectUrl(url, config);
     } catch (error) {
       if (platform === "YouTube" && isYouTubeBlockedError(error)) {
