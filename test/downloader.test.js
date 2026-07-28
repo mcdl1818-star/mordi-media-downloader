@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   extractSupportedMediaUrl,
+  isYouTubeBlockedError,
   requiresYouTubeAuthentication,
   validateMediaUrl,
   videoFormatForHeight
@@ -43,4 +44,9 @@ test("uses account cookies only for content that actually requires authenticatio
   assert.equal(requiresYouTubeAuthentication(new Error("This is members-only content. Sign in")), true);
   assert.equal(requiresYouTubeAuthentication(new Error("Sign in to confirm you're not a bot")), false);
   assert.equal(requiresYouTubeAuthentication(new Error("HTTP Error 403: Forbidden")), false);
+});
+
+test("detects YouTube anti-bot blocks for the cooldown circuit breaker", () => {
+  assert.equal(isYouTubeBlockedError(new Error("Sign in to confirm you’re not a bot")), true);
+  assert.equal(isYouTubeBlockedError(new Error("HTTP Error 403: Forbidden")), false);
 });

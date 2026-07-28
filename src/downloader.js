@@ -42,8 +42,13 @@ function extractorArgs(url, youtubeClient, config, useYouTubeCookies = true) {
 
 export function requiresYouTubeAuthentication(error) {
   const message = String(error?.message || "");
-  if (/confirm you.?re not a bot|unusual traffic|temporarily blocked/i.test(message)) return false;
+  if (isYouTubeBlockedError(error)) return false;
   return /sign.?in|login|age.?restrict|members.?only|private video|authentication/i.test(message);
+}
+
+export function isYouTubeBlockedError(error) {
+  return /confirm you.?re not a bot|unusual traffic|temporarily blocked/i
+    .test(String(error?.message || ""));
 }
 
 export function validateMediaUrl(input) {

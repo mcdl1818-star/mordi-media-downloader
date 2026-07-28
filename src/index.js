@@ -3,7 +3,7 @@ import http from "node:http";
 import { readConfig } from "./config.js";
 import { Telegram } from "./telegram.js";
 import crypto from "node:crypto";
-import { extractSupportedMediaUrl, inspectUrl, download, downloadGallery, cleanupFile, assertFileSize } from "./downloader.js";
+import { extractSupportedMediaUrl, inspectUrl, download, downloadGallery, cleanupFile, assertFileSize, isYouTubeBlockedError } from "./downloader.js";
 import { downloadSelection, formatKeyboard } from "./formats.js";
 
 const config = readConfig();
@@ -13,6 +13,7 @@ const downloadQueue = [];
 let queueRunning = false;
 let currentJob = null;
 let lastYouTubeJobFinishedAt = 0;
+let youtubeBlockedUntil = 0;
 let offset = 0;
 
 const TERMS = "לשימוש אישי ולימודי בלבד. יש להוריד רק תוכן שבבעלותך או שקיבלת הרשאה מפורשת לשמור.";
@@ -40,6 +41,9 @@ function formatDuration(seconds) {
 
 function userFacingError(error) {
   const message = String(error?.message || "");
+  if (isYouTubeBlockedError(error)) {
+    return "YouTube חסם זמנית את כתובת השרת. עצרתי ניסיונות נוספים ל-30 דקות כדי לא להחמיר את החסימה; שאר האתרים ממשיכים לעבוד.";
+  }
   if (/login|sign.?in|cookies|authentication/i.test(message)) {
     return "האתר דורש התחברות או חסם זמנית את ההורדה. נסה שוב מאוחר יותר או שלח קישור ציבורי אחר.";
   }
@@ -220,6 +224,14 @@ async function handleMessage(message) {
   }
   try {
     const { url, platform } = extractSupportedMediaUrl(text);
+    if (platform === "YouTube" && Date.now() < youtubeBlockedUntil) {
+      const minutes = Math.max(1, Math.ceil((youtubeBlockedUntil - Date.now()) / 60_000));
+      await telegram.sendMessage(
+        chatId,
+        `🛡️ YouTube נמצא בהשהיית הגנה לעוד כ-${minutes} דקות בגלל חסימת anti-bot של כתובת השרת. שאר האתרים זמינים כרגיל.`
+      );
+      return;
+    }
     if (queueRunning || downloadQueue.length) {
       const isInstagramGallery = platform === "Instagram" && !new URL(url).pathname.startsWith("/reel/");
       const queuedStatus = await telegram.sendMessage(
@@ -247,6 +259,9 @@ async function handleMessage(message) {
     try {
       info = await inspectUrl(url, config);
     } catch (error) {
+      if (platform === "YouTube" && isYouTubeBlockedError(error)) {
+        youtubeBlockedUntil = Date.now() + 30 * 60_000;
+      }
       if (platform !== "Instagram") throw error;
       info = {
         title: "פוסט Instagram",
