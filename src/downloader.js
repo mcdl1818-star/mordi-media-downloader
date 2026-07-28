@@ -151,7 +151,7 @@ export async function download(url, kind, config) {
     "-o", outputTemplate
   ];
   const mediaArgs = kind === "audio"
-    ? ["-x", "--audio-format", "mp3", "--audio-quality", "5"]
+    ? ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "5"]
     : [
         "-f",
         "22/18/b[height<=720][ext=mp4]/bv*[height<=720]+ba/b[height<=720]/b",
