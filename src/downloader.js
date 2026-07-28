@@ -499,8 +499,9 @@ export async function download(
       "--sub-langs", "he.*,en.*",
       "--sub-format", "vtt/srt/best",
       "--embed-subs"
-    );
+      );
   }
+  let fallbackMetadata = null;
   try {
     const clients = isYouTube ? YOUTUBE_CLIENTS : [null];
     let completed = false;
@@ -532,6 +533,10 @@ export async function download(
   } catch (error) {
     if (!/(^|\.)vimeo\.com$/i.test(new URL(url).hostname)) throw error;
     const vimeo = await getVimeoConfig(url);
+    fallbackMetadata = {
+      title: vimeo.video?.title || "Vimeo audio",
+      artist: vimeo.video?.owner?.name || "Vimeo"
+    };
     const progressive = [...(vimeo.request?.files?.progressive || [])]
       .filter(item => item.url)
       .sort((a, b) => (b.height || 0) - (a.height || 0));
@@ -543,7 +548,15 @@ export async function download(
     await writeResponseToFile(mediaResponse, sourcePath, onProgress);
     if (kind === "audio") {
       const audioPath = path.join(jobDir, "vimeo-audio.mp3");
-      await run(config.ffmpegPath, ["-i", sourcePath, "-vn", "-c:a", "libmp3lame", "-q:a", "5", audioPath]);
+      await run(config.ffmpegPath, [
+        "-y", "-i", sourcePath,
+        "-vn",
+        "-c:a", "libmp3lame",
+        "-b:a", `${Math.max(64, Math.min(320, Number(audioBitrate) || 128))}k`,
+        "-metadata", `title=${fallbackMetadata.title}`,
+        "-metadata", `artist=${fallbackMetadata.artist}`,
+        audioPath
+      ]);
       await fs.promises.rm(sourcePath, { force: true });
     }
   }
