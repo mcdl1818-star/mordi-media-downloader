@@ -15,7 +15,7 @@ const PLATFORM_RULES = [
 
 const EXTRACTOR_ARGS = [
   "--js-runtimes", "node",
-  "--extractor-args", "youtubepot-bgutilscript:server_home=/opt/bgutil/server",
+  "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
   "--extractor-args", "twitter:api=syndication"
 ];
 

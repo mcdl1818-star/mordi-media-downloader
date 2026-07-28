@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fitTelegramCaption } from "../src/telegram.js";
+import { fitTelegramCaption, telegramReplyParameters } from "../src/telegram.js";
 
 test("keeps captions that fit Telegram's limit", () => {
   assert.equal(fitTelegramCaption("כותרת קצרה"), "כותרת קצרה");
@@ -19,4 +19,13 @@ test("does not split Unicode characters", () => {
 
   assert.equal(Array.from(result).length, 1024);
   assert.ok(result.endsWith("…"));
+});
+
+test("builds safe Telegram reply parameters", () => {
+  assert.deepEqual(telegramReplyParameters(123), {
+    message_id: 123,
+    allow_sending_without_reply: true
+  });
+  assert.equal(telegramReplyParameters(0), null);
+  assert.equal(telegramReplyParameters("not-a-message"), null);
 });

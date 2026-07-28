@@ -92,6 +92,13 @@ async function editStatus(job, text) {
   }
 }
 
+function replyExtra(messageId) {
+  const value = Number(messageId);
+  return Number.isInteger(value) && value > 0
+    ? { reply_parameters: { message_id: value, allow_sending_without_reply: true } }
+    : {};
+}
+
 function enqueueDownload(job) {
   const queued = Boolean(currentJob || queueRunning || downloadQueue.length);
   downloadQueue.push(job);
@@ -140,7 +147,13 @@ async function processDownloadJob(job) {
         filePath = files[index];
         await editStatus(job, `📤 שולח קובץ ${index + 1}/${files.length}\n${progressBar(((index + 1) / files.length) * 100)}`);
         await assertFileSize(filePath, config.maxBytes);
-        await telegram.sendFile("sendDocument", job.chatId, filePath, `${job.title} • ${index + 1}/${files.length}`);
+        await telegram.sendFile(
+          "sendDocument",
+          job.chatId,
+          filePath,
+          `${job.title} • ${index + 1}/${files.length}`,
+          { replyToMessageId: job.sourceMessageId }
+        );
       }
       await editStatus(job, `✅ הושלם: ${files.length} קבצים נשלחו.`);
       return;
@@ -151,7 +164,13 @@ async function processDownloadJob(job) {
     await statusChain;
     await editStatus(job, `📤 ההורדה הסתיימה, שולח לטלגרם...\n${progressBar(100)}`);
     await assertFileSize(filePath, config.maxBytes);
-    await telegram.sendFile(job.kind === "audio" ? "sendAudio" : "sendVideo", job.chatId, filePath, job.title);
+    await telegram.sendFile(
+      job.kind === "audio" ? "sendAudio" : "sendVideo",
+      job.chatId,
+      filePath,
+      job.title,
+      { replyToMessageId: job.sourceMessageId }
+    );
     await editStatus(job, `✅ הושלם ונשלח\n${progressBar(100)}`);
   } catch (error) {
     await editStatus(job, `❌ ${userFacingError(error)}`);
@@ -197,6 +216,7 @@ async function handleMessage(message) {
   }
   const chatId = message.chat.id;
   const text = message.text?.trim() || "";
+  let inspectionStatus;
   removeExpiredSelections();
   if (text === "/deletecookies") {
     await fs.promises.rm(config.youtubeCookiesPath, { force: true });
@@ -228,7 +248,8 @@ async function handleMessage(message) {
       const minutes = Math.max(1, Math.ceil((youtubeBlockedUntil - Date.now()) / 60_000));
       await telegram.sendMessage(
         chatId,
-        `🛡️ YouTube נמצא בהשהיית הגנה לעוד כ-${minutes} דקות בגלל חסימת anti-bot של כתובת השרת. שאר האתרים זמינים כרגיל.`
+        `🛡️ YouTube נמצא בהשהיית הגנה לעוד כ-${minutes} דקות בגלל חסימת anti-bot של כתובת השרת. שאר האתרים זמינים כרגיל.`,
+        replyExtra(message.message_id)
       );
       return;
     }
@@ -236,7 +257,8 @@ async function handleMessage(message) {
       const isInstagramGallery = platform === "Instagram" && !new URL(url).pathname.startsWith("/reel/");
       const queuedStatus = await telegram.sendMessage(
         chatId,
-        "⏳ סרטון אחר נמצא באמצע הורדה. הקישור נשמר בתור..."
+        "⏳ סרטון אחר נמצא באמצע הורדה. הקישור נשמר בתור...",
+        replyExtra(message.message_id)
       );
       const queued = enqueueDownload({
         url,
@@ -245,6 +267,7 @@ async function handleMessage(message) {
         kind: isInstagramGallery ? "gallery" : "video",
         height: isInstagramGallery ? null : 720,
         label: isInstagramGallery ? "גלריה" : "720p",
+        sourceMessageId: message.message_id,
         chatId,
         statusMessageId: queuedStatus.message_id
       });
@@ -254,7 +277,11 @@ async function handleMessage(message) {
       );
       return;
     }
-    const status = await telegram.sendMessage(chatId, "🔎 בודק את הקישור...");
+    inspectionStatus = await telegram.sendMessage(
+      chatId,
+      "🔎 בודק את הקישור...",
+      replyExtra(message.message_id)
+    );
     let info;
     try {
       info = await inspectUrl(url, config);
@@ -271,16 +298,31 @@ async function handleMessage(message) {
       };
     }
     const selectionId = crypto.randomBytes(8).toString("hex");
-    pending.set(selectionId, { url: info.webpageUrl, title: info.title, platform, createdAt: Date.now() });
+    pending.set(selectionId, {
+      url: info.webpageUrl,
+      title: info.title,
+      platform,
+      sourceMessageId: message.message_id,
+      createdAt: Date.now()
+    });
     await telegram.call("editMessageText", {
       chat_id: chatId,
-      message_id: status.message_id,
+      message_id: inspectionStatus.message_id,
       text: `🌐 ${platform}\n🎞 ${previewText(info.title)}\n👤 ${previewText(info.channel, 180)}\n⏱ ${formatDuration(info.duration)}\n\nבחר פורמט:`,
       reply_markup: platformKeyboard(platform, selectionId, url)
     });
   } catch (error) {
     console.error("Link inspection failed:", String(error?.message || error).slice(0, 1200));
-    await telegram.sendMessage(chatId, `❌ ${userFacingError(error)}`);
+    const errorText = `❌ ${userFacingError(error)}`;
+    if (inspectionStatus?.message_id) {
+      await telegram.call("editMessageText", {
+        chat_id: chatId,
+        message_id: inspectionStatus.message_id,
+        text: errorText
+      });
+    } else {
+      await telegram.sendMessage(chatId, errorText, replyExtra(message.message_id));
+    }
   }
 }
 
@@ -299,7 +341,8 @@ async function handleCallback(query) {
     query.message.chat.id,
     queueRunning || downloadQueue.length
       ? "⏳ סרטון אחר נמצא באמצע הורדה. הבקשה נשמרת בתור..."
-      : "⏳ מכין את ההורדה..."
+      : "⏳ מכין את ההורדה...",
+    replyExtra(item.sourceMessageId)
   );
   const queued = enqueueDownload({
     ...item,

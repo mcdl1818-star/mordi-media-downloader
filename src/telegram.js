@@ -9,6 +9,13 @@ export function fitTelegramCaption(caption, limit = TELEGRAM_CAPTION_LIMIT) {
   return `${characters.slice(0, Math.max(0, limit - 1)).join("").trimEnd()}…`;
 }
 
+export function telegramReplyParameters(messageId) {
+  const value = Number(messageId);
+  return Number.isInteger(value) && value > 0
+    ? { message_id: value, allow_sending_without_reply: true }
+    : null;
+}
+
 export class Telegram {
   constructor(token) {
     this.baseUrl = `https://api.telegram.org/bot${token}`;
@@ -43,10 +50,12 @@ export class Telegram {
     return destination;
   }
 
-  async sendFile(method, chatId, filePath, caption) {
+  async sendFile(method, chatId, filePath, caption, { replyToMessageId } = {}) {
     const form = new FormData();
     form.set("chat_id", String(chatId));
     form.set("caption", fitTelegramCaption(caption));
+    const replyParameters = telegramReplyParameters(replyToMessageId);
+    if (replyParameters) form.set("reply_parameters", JSON.stringify(replyParameters));
     const fields = {
       sendAudio: "audio",
       sendVideo: "video",
