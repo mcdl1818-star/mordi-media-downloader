@@ -54,13 +54,26 @@ jobs:
       REPLY_TO: ${{ inputs.reply_to }}
       STATUS_MESSAGE_ID: ${{ inputs.status_message_id }}
       BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
 
     steps:
+      - name: Set up JavaScript runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Install media tools
         run: |
           python -m pip install --upgrade --pre "yt-dlp[default,curl-cffi]"
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+
+      - name: Restore YouTube authentication
+        run: |
+          set -euo pipefail
+          test -n "${YOUTUBE_COOKIES_B64}"
+          printf '%s' "${YOUTUBE_COOKIES_B64}" | base64 --decode > /tmp/youtube-cookies.txt
+          chmod 600 /tmp/youtube-cookies.txt
 
       - name: Notify Telegram
         run: |
@@ -84,6 +97,8 @@ jobs:
             --retries 5
             --fragment-retries 8
             --max-filesize 48M
+            --cookies /tmp/youtube-cookies.txt
+            --js-runtimes node
             --print-to-file after_move:filepath /tmp/final-path.txt
             -o "output/%(title).80B [%(id)s].%(ext)s"
           )
