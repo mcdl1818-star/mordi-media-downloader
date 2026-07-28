@@ -264,6 +264,7 @@ async function handleMessage(message) {
       reply_markup: platformKeyboard(platform, selectionId, url)
     });
   } catch (error) {
+    console.error("Link inspection failed:", String(error?.message || error).slice(0, 1200));
     await telegram.sendMessage(chatId, `❌ ${userFacingError(error)}`);
   }
 }

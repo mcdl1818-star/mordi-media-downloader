@@ -19,10 +19,10 @@ const EXTRACTOR_ARGS = [
   "--extractor-args", "twitter:api=syndication"
 ];
 
-// Retrying the same video through several YouTube clients multiplies requests and
-// can flag an authenticated session very quickly. mweb is the client recommended
-// for the PO-token provider installed in the container.
-const YOUTUBE_CLIENTS = ["mweb"];
+// Try the recommended mweb + PO-token path first. Public guest-only fallbacks use
+// HLS/embedded clients without cookies, so a blocked cloud IP does not burn the
+// authenticated account session.
+const YOUTUBE_CLIENTS = ["mweb", "web_safari", "web_embedded"];
 
 function extractorArgs(url, youtubeClient, config, useYouTubeCookies = true) {
   const args = [...EXTRACTOR_ARGS];
@@ -189,11 +189,14 @@ export async function inspectUrl(url, config) {
   try {
     const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
     const clients = isYouTube ? YOUTUBE_CLIENTS : [null];
-    const authenticationModes = isYouTube && config.youtubeCookiesPath && fs.existsSync(config.youtubeCookiesPath)
-      ? [false, true]
-      : [false];
     let lastError;
     for (const client of clients) {
+      const authenticationModes = isYouTube
+        && client === "mweb"
+        && config.youtubeCookiesPath
+        && fs.existsSync(config.youtubeCookiesPath)
+        ? [false, true]
+        : [false];
       for (const useCookies of authenticationModes) {
         try {
           const output = await run(config.ytDlpPath, [
@@ -287,12 +290,15 @@ export async function download(url, kind, config, onProgress, { maxHeight = 720 
   try {
     const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
     const clients = isYouTube ? YOUTUBE_CLIENTS : [null];
-    const authenticationModes = isYouTube && config.youtubeCookiesPath && fs.existsSync(config.youtubeCookiesPath)
-      ? [false, true]
-      : [false];
     let completed = false;
     let lastError;
     for (const client of clients) {
+      const authenticationModes = isYouTube
+        && client === "mweb"
+        && config.youtubeCookiesPath
+        && fs.existsSync(config.youtubeCookiesPath)
+        ? [false, true]
+        : [false];
       for (const useCookies of authenticationModes) {
         try {
           await run(
