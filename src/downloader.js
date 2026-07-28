@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { once } from "node:events";
 
 const PLATFORM_RULES = [
   ["YouTube", /(^|\.)youtube\.com$|^youtu\.be$/],
@@ -23,13 +24,13 @@ const EXTRACTOR_ARGS = [
 // for the PO-token provider installed in the container.
 const YOUTUBE_CLIENTS = ["mweb"];
 
-function extractorArgs(url, youtubeClient, config) {
+function extractorArgs(url, youtubeClient, config, useYouTubeCookies = true) {
   const args = [...EXTRACTOR_ARGS];
   const hostname = new URL(url).hostname;
   if (/(^|\.)youtube\.com$|^youtu\.be$/i.test(hostname) && youtubeClient) {
     args.push("--extractor-args", `youtube:player_client=${youtubeClient}`);
     args.push("--sleep-requests", "1", "--retry-sleep", "http:exp=1:10");
-    if (config.youtubeCookiesPath && fs.existsSync(config.youtubeCookiesPath)) {
+    if (useYouTubeCookies && config.youtubeCookiesPath && fs.existsSync(config.youtubeCookiesPath)) {
       args.push("--cookies", config.youtubeCookiesPath);
     }
   }
@@ -37,6 +38,12 @@ function extractorArgs(url, youtubeClient, config) {
     args.push("--impersonate", "chrome");
   }
   return args;
+}
+
+export function requiresYouTubeAuthentication(error) {
+  const message = String(error?.message || "");
+  if (/confirm you.?re not a bot|unusual traffic|temporarily blocked/i.test(message)) return false;
+  return /sign.?in|login|age.?restrict|members.?only|private video|authentication/i.test(message);
 }
 
 export function validateMediaUrl(input) {
@@ -147,26 +154,34 @@ async function writeResponseToFile(response, destination, onProgress) {
     return;
   }
   const reader = response.body.getReader();
-  const chunks = [];
+  const output = fs.createWriteStream(destination);
   const startedAt = Date.now();
   let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(Buffer.from(value));
-    received += value.byteLength;
-    if (total && onProgress) {
-      const elapsedSeconds = Math.max(0.1, (Date.now() - startedAt) / 1000);
-      const speedBytes = received / elapsedSeconds;
-      const remainingSeconds = speedBytes > 0 ? Math.max(0, Math.round((total - received) / speedBytes)) : 0;
-      await onProgress({
-        percent: (received / total) * 100,
-        speed: formatTransferSpeed(speedBytes),
-        eta: remainingSeconds ? `${remainingSeconds}s` : ""
-      });
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      if (!output.write(chunk)) await once(output, "drain");
+      received += chunk.length;
+      if (total && onProgress) {
+        const elapsedSeconds = Math.max(0.1, (Date.now() - startedAt) / 1000);
+        const speedBytes = received / elapsedSeconds;
+        const remainingSeconds = speedBytes > 0 ? Math.max(0, Math.round((total - received) / speedBytes)) : 0;
+        await onProgress({
+          percent: (received / total) * 100,
+          speed: formatTransferSpeed(speedBytes),
+          eta: remainingSeconds ? `${remainingSeconds}s` : ""
+        });
+      }
     }
+    output.end();
+    await once(output, "finish");
+  } catch (error) {
+    output.destroy();
+    await fs.promises.rm(destination, { force: true });
+    throw error;
   }
-  await fs.promises.writeFile(destination, Buffer.concat(chunks));
 }
 
 export async function inspectUrl(url, config) {
@@ -174,20 +189,27 @@ export async function inspectUrl(url, config) {
   try {
     const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
     const clients = isYouTube ? YOUTUBE_CLIENTS : [null];
+    const authenticationModes = isYouTube && config.youtubeCookiesPath && fs.existsSync(config.youtubeCookiesPath)
+      ? [false, true]
+      : [false];
     let lastError;
     for (const client of clients) {
-      try {
-        const output = await run(config.ytDlpPath, [
-          "--no-playlist", "--dump-single-json", "--no-warnings",
-          ...extractorArgs(url, client, config),
-          "-f", "b/bv*+ba",
-          "--", url
-        ], { timeoutMs: 60_000 });
-        info = JSON.parse(output);
-        break;
-      } catch (error) {
-        lastError = error;
+      for (const useCookies of authenticationModes) {
+        try {
+          const output = await run(config.ytDlpPath, [
+            "--no-playlist", "--dump-single-json", "--no-warnings",
+            ...extractorArgs(url, client, config, useCookies),
+            "-f", "b/bv*+ba",
+            "--", url
+          ], { timeoutMs: 60_000 });
+          info = JSON.parse(output);
+          break;
+        } catch (error) {
+          lastError = error;
+          if (!useCookies && !requiresYouTubeAuthentication(error)) break;
+        }
       }
+      if (info) break;
     }
     if (!info) throw lastError;
   } catch (error) {
@@ -212,17 +234,31 @@ export async function inspectUrl(url, config) {
   };
 }
 
-export async function download(url, kind, config, onProgress) {
+export function videoFormatForHeight(maxHeight = 720) {
+  const height = [360, 480, 720, 1080].includes(Number(maxHeight)) ? Number(maxHeight) : 720;
+  return [
+    `bv*[height<=${height}][ext=mp4]+ba[ext=m4a]`,
+    `bv*[height<=${height}]+ba`,
+    `b[height<=${height}][ext=mp4]`,
+    `b[height<=${height}]`,
+    `worst[height<=${height}]`
+  ].join("/");
+}
+
+export async function download(url, kind, config, onProgress, { maxHeight = 720 } = {}) {
   await fs.promises.mkdir(config.tempDir, { recursive: true });
   const jobDir = path.join(config.tempDir, crypto.randomUUID());
   await fs.promises.mkdir(jobDir);
   const outputTemplate = path.join(jobDir, "%(title).80B [%(id)s].%(ext)s");
   const common = [
     "--no-playlist", "--windows-filenames", "--trim-filenames", "120",
-    "--concurrent-fragments", "2",
-    "--socket-timeout", "20",
-    "--retries", "3",
-    "--fragment-retries", "3",
+    "--concurrent-fragments", "4",
+    "--socket-timeout", "25",
+    "--retries", "5",
+    "--fragment-retries", "8",
+    "--file-access-retries", "3",
+    "--retry-sleep", "http:exp=1:10",
+    "--retry-sleep", "fragment:exp=1:8",
     "--newline",
     "--progress",
     "--progress-delta", "1",
@@ -242,28 +278,36 @@ export async function download(url, kind, config, onProgress) {
       ]
     : [
         "-f",
-        "22/18/b[height<=720][ext=mp4]/bv*[height<=720]+ba/b[height<=720]/b",
+        videoFormatForHeight(maxHeight),
+        "--remux-video",
+        "mp4",
         "--merge-output-format",
         "mp4"
       ];
   try {
     const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
     const clients = isYouTube ? YOUTUBE_CLIENTS : [null];
-    const pacingArgs = isYouTube ? ["--sleep-interval", "5", "--max-sleep-interval", "9"] : [];
+    const authenticationModes = isYouTube && config.youtubeCookiesPath && fs.existsSync(config.youtubeCookiesPath)
+      ? [false, true]
+      : [false];
     let completed = false;
     let lastError;
     for (const client of clients) {
-      try {
-        await run(
-          config.ytDlpPath,
-          [...common, ...pacingArgs, ...extractorArgs(url, client, config), ...mediaArgs, "--", url],
-          { onProgress }
-        );
-        completed = true;
-        break;
-      } catch (error) {
-        lastError = error;
+      for (const useCookies of authenticationModes) {
+        try {
+          await run(
+            config.ytDlpPath,
+            [...common, ...extractorArgs(url, client, config, useCookies), ...mediaArgs, "--", url],
+            { onProgress }
+          );
+          completed = true;
+          break;
+        } catch (error) {
+          lastError = error;
+          if (!useCookies && !requiresYouTubeAuthentication(error)) break;
+        }
       }
+      if (completed) break;
     }
     if (!completed) throw lastError;
   } catch (error) {
@@ -272,7 +316,7 @@ export async function download(url, kind, config, onProgress) {
     const progressive = [...(vimeo.request?.files?.progressive || [])]
       .filter(item => item.url)
       .sort((a, b) => (b.height || 0) - (a.height || 0));
-    const selected = progressive.find(item => (item.height || 0) <= 720) || progressive.at(-1);
+    const selected = progressive.find(item => (item.height || 0) <= maxHeight) || progressive.at(-1);
     if (!selected) throw error;
     const mediaResponse = await fetch(selected.url, { headers: { "user-agent": "Mozilla/5.0", referer: url } });
     if (!mediaResponse.ok) throw new Error("Vimeo חסם זמנית את הורדת הסרטון.");

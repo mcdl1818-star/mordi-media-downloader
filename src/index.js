@@ -4,6 +4,7 @@ import { readConfig } from "./config.js";
 import { Telegram } from "./telegram.js";
 import crypto from "node:crypto";
 import { extractSupportedMediaUrl, inspectUrl, download, downloadGallery, cleanupFile, assertFileSize } from "./downloader.js";
+import { downloadSelection, formatKeyboard } from "./formats.js";
 
 const config = readConfig();
 const telegram = new Telegram(config.token);
@@ -17,12 +18,7 @@ let offset = 0;
 const TERMS = "לשימוש אישי ולימודי בלבד. יש להוריד רק תוכן שבבעלותך או שקיבלת הרשאה מפורשת לשמור.";
 
 function keyboard(id) {
-  return {
-    inline_keyboard: [[
-      { text: "🎬 וידאו 720p", callback_data: `video:${id}` },
-      { text: "🎵 MP3", callback_data: `audio:${id}` }
-    ]]
-  };
+  return formatKeyboard(id);
 }
 
 function platformKeyboard(platform, id, url) {
@@ -63,6 +59,12 @@ function progressBar(percent) {
   const value = Math.max(0, Math.min(100, Math.round(percent)));
   const filled = Math.round(value / 5);
   return `${"█".repeat(filled)}${"░".repeat(20 - filled)} ${value}%`;
+}
+
+function previewText(value, maxCharacters = 900) {
+  const characters = Array.from(String(value || "").trim());
+  if (characters.length <= maxCharacters) return characters.join("");
+  return `${characters.slice(0, maxCharacters - 1).join("").trimEnd()}…`;
 }
 
 function queuePositionText(position) {
@@ -121,7 +123,7 @@ async function processDownloadJob(job) {
     ].filter(Boolean).join(" • ");
     statusChain = statusChain.then(() => editStatus(
       job,
-      `${job.kind === "audio" ? "🎵 מכין MP3" : "🎬 מוריד וידאו"}\n${progressBar(percent)}\n${details}`
+      `${job.kind === "audio" ? "🎵 מכין MP3" : `🎬 מוריד וידאו ${job.label || "720p"}`}\n${progressBar(percent)}\n${details}`
     ));
   };
 
@@ -140,8 +142,8 @@ async function processDownloadJob(job) {
       return;
     }
 
-    await editStatus(job, `${job.kind === "audio" ? "🎵 מכין MP3" : "🎬 מתחיל הורדת וידאו"}\n${progressBar(0)}`);
-    filePath = await download(job.url, job.kind, config, updateProgress);
+    await editStatus(job, `${job.kind === "audio" ? "🎵 מכין MP3" : `🎬 מתחיל הורדת וידאו ${job.label || "720p"}`}\n${progressBar(0)}`);
+    filePath = await download(job.url, job.kind, config, updateProgress, { maxHeight: job.height });
     await statusChain;
     await editStatus(job, `📤 ההורדה הסתיימה, שולח לטלגרם...\n${progressBar(100)}`);
     await assertFileSize(filePath, config.maxBytes);
@@ -229,6 +231,8 @@ async function handleMessage(message) {
         title: platform,
         platform,
         kind: isInstagramGallery ? "gallery" : "video",
+        height: isInstagramGallery ? null : 720,
+        label: isInstagramGallery ? "גלריה" : "720p",
         chatId,
         statusMessageId: queuedStatus.message_id
       });
@@ -256,7 +260,7 @@ async function handleMessage(message) {
     await telegram.call("editMessageText", {
       chat_id: chatId,
       message_id: status.message_id,
-      text: `🌐 ${platform}\n🎞 ${info.title}\n👤 ${info.channel}\n⏱ ${formatDuration(info.duration)}\n\nבחר פורמט:`,
+      text: `🌐 ${platform}\n🎞 ${previewText(info.title)}\n👤 ${previewText(info.channel, 180)}\n⏱ ${formatDuration(info.duration)}\n\nבחר פורמט:`,
       reply_markup: platformKeyboard(platform, selectionId, url)
     });
   } catch (error) {
@@ -268,8 +272,9 @@ async function handleCallback(query) {
   const userId = String(query.from?.id || "");
   if (userId !== config.allowedUserId) return;
   const [kind, id] = (query.data || "").split(":");
+  const selection = downloadSelection(kind);
   const item = pending.get(id);
-  if (!item || Date.now() - item.createdAt > config.tempTtlMs) {
+  if (!selection || !item || Date.now() - item.createdAt > config.tempTtlMs) {
     await telegram.answerCallbackQuery(query.id, "הבחירה פגה. שלח את הקישור מחדש.");
     return;
   }
@@ -282,7 +287,7 @@ async function handleCallback(query) {
   );
   const queued = enqueueDownload({
     ...item,
-    kind,
+    ...selection,
     chatId: query.message.chat.id,
     statusMessageId: status.message_id
   });
