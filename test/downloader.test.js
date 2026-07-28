@@ -4,6 +4,7 @@ import {
   extractSupportedMediaUrl,
   extractMediaUrlsFromHtml,
   isYouTubeBlockedError,
+  isLikelyDirectMediaUrl,
   requiresYouTubeAuthentication,
   validateMediaUrl,
   videoFormatForHeight
@@ -50,6 +51,12 @@ test("extracts and deduplicates common media references from HTML", () => {
     "https://cdn.example.com/movie.mp4",
     "https://example.com/clip.webm"
   ]);
+});
+
+test("recognizes direct media links for the fast inspection path", () => {
+  assert.equal(isLikelyDirectMediaUrl("https://cdn.example.com/photo.JPG?size=large"), true);
+  assert.equal(isLikelyDirectMediaUrl("https://cdn.example.com/video.mp4"), true);
+  assert.equal(isLikelyDirectMediaUrl("https://example.com/article/123"), false);
 });
 
 test("builds bounded video format selectors with a safe fallback", () => {

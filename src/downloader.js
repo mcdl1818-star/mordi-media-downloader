@@ -337,8 +337,18 @@ async function inspectPageMedia(url, config) {
   };
 }
 
+export function isLikelyDirectMediaUrl(input) {
+  try {
+    return /\.(?:jpe?g|png|webp|gif|avif|svg|mp4|webm|mov|m4v|mp3|m4a|ogg|wav)(?:$|[?#])/i
+      .test(new URL(input).pathname);
+  } catch {
+    return false;
+  }
+}
+
 export async function inspectUrl(url, config) {
   await assertPublicUrl(url);
+  if (isLikelyDirectMediaUrl(url)) return inspectPageMedia(url, config);
   let info;
   try {
     const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
