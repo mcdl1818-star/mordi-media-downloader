@@ -22,8 +22,8 @@ function keyboard(id) {
   return formatKeyboard(id);
 }
 
-function platformKeyboard(platform, id, url) {
-  if (platform === "Instagram" && !new URL(url).pathname.startsWith("/reel/")) {
+function platformKeyboard(platform, id, url, mediaKind = "video") {
+  if (mediaKind !== "video" || (platform === "Instagram" && !new URL(url).pathname.startsWith("/reel/"))) {
     return {
       inline_keyboard: [[
         { text: "🖼 הורד את כל המדיה", callback_data: `gallery:${id}` }
@@ -141,7 +141,7 @@ async function processDownloadJob(job) {
   try {
     await waitForYouTubePacing(job);
     if (job.kind === "gallery") {
-      await editStatus(job, "🖼 אוסף את כל המדיה מהפוסט...");
+      await editStatus(job, "🖼 מאתר ומוריד את כל המדיה מהקישור...");
       const files = await downloadGallery(job.url, config);
       for (let index = 0; index < files.length; index += 1) {
         filePath = files[index];
@@ -155,7 +155,7 @@ async function processDownloadJob(job) {
           { replyToMessageId: job.sourceMessageId }
         );
       }
-      await editStatus(job, `✅ הושלם: ${files.length} קבצים נשלחו.`);
+      await editStatus(job, `✅ הושלם: ${files.length} קובצי מדיה נשלחו.`);
       return;
     }
 
@@ -239,7 +239,7 @@ async function handleMessage(message) {
   }
   if (text === "/start" || text === "/help") {
     await telegram.sendMessage(chatId,
-      `שלום! שלח לי קישור מ־YouTube, Instagram, Facebook, X/Twitter, TikTok או Vimeo ואציג אפשרויות הורדה.\n\n${TERMS}`);
+      `שלום! שלח לי קישור HTTPS ציבורי מכל אתר. הבוט יחפש וידאו, אודיו ותמונות באמצעות כמה מנועי חילוץ, ויציג את אפשרויות ההורדה שמצא.\n\n${TERMS}`);
     return;
   }
   try {
@@ -250,30 +250,6 @@ async function handleMessage(message) {
         chatId,
         `🛡️ YouTube נמצא בהשהיית הגנה לעוד כ-${minutes} דקות בגלל חסימת anti-bot של כתובת השרת. שאר האתרים זמינים כרגיל.`,
         replyExtra(message.message_id)
-      );
-      return;
-    }
-    if (queueRunning || downloadQueue.length) {
-      const isInstagramGallery = platform === "Instagram" && !new URL(url).pathname.startsWith("/reel/");
-      const queuedStatus = await telegram.sendMessage(
-        chatId,
-        "⏳ סרטון אחר נמצא באמצע הורדה. הקישור נשמר בתור...",
-        replyExtra(message.message_id)
-      );
-      const queued = enqueueDownload({
-        url,
-        title: platform,
-        platform,
-        kind: isInstagramGallery ? "gallery" : "video",
-        height: isInstagramGallery ? null : 720,
-        label: isInstagramGallery ? "גלריה" : "720p",
-        sourceMessageId: message.message_id,
-        chatId,
-        statusMessageId: queuedStatus.message_id
-      });
-      await editStatus(
-        { chatId, statusMessageId: queuedStatus.message_id },
-        `⏳ סרטון אחר נמצא באמצע הורדה.\n${queuePositionText(queued.position || 1)}`
       );
       return;
     }
@@ -302,14 +278,15 @@ async function handleMessage(message) {
       url: info.webpageUrl,
       title: info.title,
       platform,
+      mediaKind: info.mediaKind || "video",
       sourceMessageId: message.message_id,
       createdAt: Date.now()
     });
     await telegram.call("editMessageText", {
       chat_id: chatId,
       message_id: inspectionStatus.message_id,
-      text: `🌐 ${platform}\n🎞 ${previewText(info.title)}\n👤 ${previewText(info.channel, 180)}\n⏱ ${formatDuration(info.duration)}\n\nבחר פורמט:`,
-      reply_markup: platformKeyboard(platform, selectionId, url)
+      text: `🌐 ${platform}\n🎞 ${previewText(info.title)}\n👤 ${previewText(info.channel, 180)}\n${info.mediaCount > 1 ? `🗂 נמצאו עד ${info.mediaCount} פריטי מדיה\n` : ""}⏱ ${formatDuration(info.duration)}\n\nבחר פורמט:`,
+      reply_markup: platformKeyboard(platform, selectionId, url, info.mediaKind)
     });
   } catch (error) {
     console.error("Link inspection failed:", String(error?.message || error).slice(0, 1200));

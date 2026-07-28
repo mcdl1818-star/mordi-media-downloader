@@ -28,7 +28,10 @@ export function formatKeyboard(id) {
         text: `🎬 ${item.label}`,
         callback_data: `${item.callbackKind}:${id}`
       })),
-      [{ text: "🎵 MP3", callback_data: `audio:${id}` }]
+      [
+        { text: "🎵 MP3", callback_data: `audio:${id}` },
+        { text: "🖼 כל המדיה", callback_data: `gallery:${id}` }
+      ]
     ]
   };
 }

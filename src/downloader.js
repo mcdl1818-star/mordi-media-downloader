@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { once } from "node:events";
+import dns from "node:dns/promises";
+import net from "node:net";
 
 const PLATFORM_RULES = [
   ["YouTube", /(^|\.)youtube\.com$|^youtu\.be$/],
@@ -59,15 +61,19 @@ export function validateMediaUrl(input) {
   } catch {
     throw new Error("הקישור אינו כתובת URL תקינה.");
   }
-  const platform = PLATFORM_RULES.find(([, rule]) => rule.test(url.hostname.toLowerCase()));
-  if (url.protocol !== "https:" || !platform) {
-    throw new Error("הקישור אינו מפלטפורמה נתמכת.");
+  if (url.protocol !== "https:" || url.username || url.password || !url.hostname) {
+    throw new Error("יש לשלוח קישור HTTPS ציבורי ותקין.");
   }
-  return { url: url.toString(), platform: platform[0] };
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (hostname === "localhost" || hostname.endsWith(".localhost") || isPrivateAddress(hostname)) {
+    throw new Error("מטעמי אבטחה לא ניתן לגשת לכתובת מקומית או פרטית.");
+  }
+  const platform = PLATFORM_RULES.find(([, rule]) => rule.test(hostname));
+  return { url: url.toString(), platform: platform?.[0] || "אתר כללי" };
 }
 
 export function extractSupportedMediaUrl(input) {
-  const candidates = String(input || "").match(/https:\/\/[^\s<>"']+/g) || [];
+  const candidates = String(input || "").match(/https:\/\/[^\s<>"']+/gi) || [];
   for (const candidate of candidates) {
     const cleaned = candidate.replace(/[)\],.!?]+$/, "");
     try {
@@ -80,6 +86,49 @@ export function extractSupportedMediaUrl(input) {
 }
 
 export const validateYouTubeUrl = input => validateMediaUrl(input).url;
+
+function isPrivateAddress(address) {
+  if (!net.isIP(address)) return false;
+  if (address === "::" || address === "::1" || address.startsWith("fc") || address.startsWith("fd") || address.startsWith("fe8") || address.startsWith("fe9") || address.startsWith("fea") || address.startsWith("feb")) return true;
+  if (address.startsWith("::ffff:")) return isPrivateAddress(address.slice(7));
+  const octets = address.split(".").map(Number);
+  if (octets.length !== 4) return false;
+  return octets[0] === 0
+    || octets[0] === 10
+    || octets[0] === 127
+    || (octets[0] === 169 && octets[1] === 254)
+    || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+    || (octets[0] === 192 && octets[1] === 168)
+    || (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127)
+    || octets[0] >= 224;
+}
+
+async function assertPublicUrl(input) {
+  const { url } = validateMediaUrl(input);
+  const parsed = new URL(url);
+  const addresses = await dns.lookup(parsed.hostname, { all: true });
+  if (!addresses.length || addresses.some(item => isPrivateAddress(item.address))) {
+    throw new Error("מטעמי אבטחה הכתובת מפנה לרשת מקומית או פרטית.");
+  }
+  return parsed;
+}
+
+async function safeFetch(input, options = {}, redirects = 0) {
+  if (redirects > 5) throw new Error("האתר ביצע יותר מדי הפניות.");
+  await assertPublicUrl(input);
+  const response = await fetch(input, {
+    ...options,
+    redirect: "manual",
+    signal: options.signal || AbortSignal.timeout(30_000)
+  });
+  if ([301, 302, 303, 307, 308].includes(response.status)) {
+    const location = response.headers.get("location");
+    if (!location) return response;
+    const next = new URL(location, input).toString();
+    return safeFetch(next, options, redirects + 1);
+  }
+  return response;
+}
 
 function parseProgressLine(line, onProgress) {
   const marker = "__PROGRESS__";
@@ -153,10 +202,13 @@ function formatTransferSpeed(bytesPerSecond) {
   return `${Math.round(bytesPerSecond / 1024)} KiB/s`;
 }
 
-async function writeResponseToFile(response, destination, onProgress) {
+async function writeResponseToFile(response, destination, onProgress, maxBytes = Infinity) {
   const total = Number(response.headers.get("content-length")) || 0;
+  if (total > maxBytes) throw new Error(`הקובץ גדול מדי לשליחה ב-Telegram (${(total / 1024 / 1024).toFixed(1)}MB).`);
   if (!response.body) {
-    await fs.promises.writeFile(destination, Buffer.from(await response.arrayBuffer()));
+    const body = Buffer.from(await response.arrayBuffer());
+    if (body.length > maxBytes) throw new Error("הקובץ גדול מדי לשליחה ב-Telegram.");
+    await fs.promises.writeFile(destination, body);
     return;
   }
   const reader = response.body.getReader();
@@ -168,6 +220,9 @@ async function writeResponseToFile(response, destination, onProgress) {
       const { done, value } = await reader.read();
       if (done) break;
       const chunk = Buffer.from(value);
+      if (received + chunk.length > maxBytes) {
+        throw new Error("הקובץ גדול מדי לשליחה ב-Telegram.");
+      }
       if (!output.write(chunk)) await once(output, "drain");
       received += chunk.length;
       if (total && onProgress) {
@@ -190,7 +245,100 @@ async function writeResponseToFile(response, destination, onProgress) {
   }
 }
 
+function decodeHtml(value) {
+  return String(value || "")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
+function mediaExtension(contentType, sourceUrl) {
+  const type = String(contentType || "").split(";")[0].trim().toLowerCase();
+  const byType = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+    "image/gif": ".gif", "image/avif": ".avif", "image/svg+xml": ".svg",
+    "video/mp4": ".mp4", "video/webm": ".webm", "audio/mpeg": ".mp3",
+    "audio/mp4": ".m4a", "audio/ogg": ".ogg"
+  };
+  if (byType[type]) return byType[type];
+  const extension = path.extname(new URL(sourceUrl).pathname).toLowerCase();
+  return /^\.(jpe?g|png|webp|gif|avif|svg|mp4|webm|mov|m4v|mp3|m4a|ogg|wav)$/.test(extension)
+    ? extension.replace(".jpeg", ".jpg")
+    : "";
+}
+
+function addMediaCandidate(results, candidate, pageUrl) {
+  if (!candidate || /^(data|blob|javascript):/i.test(candidate)) return;
+  try {
+    const normalized = new URL(decodeHtml(candidate), pageUrl).toString();
+    if (normalized.startsWith("https://") && !results.includes(normalized)) results.push(normalized);
+  } catch {
+    // Ignore malformed media references.
+  }
+}
+
+export function extractMediaUrlsFromHtml(html, pageUrl, maxItems = 15) {
+  const results = [];
+  const source = String(html || "");
+  const metaPattern = /<meta\b[^>]*>/gi;
+  for (const tag of source.match(metaPattern) || []) {
+    const key = tag.match(/\b(?:property|name)\s*=\s*["']([^"']+)["']/i)?.[1] || "";
+    if (!/^(?:og:(?:image|video|audio)(?::secure_url)?|twitter:(?:image|player:stream))$/i.test(key)) continue;
+    const content = tag.match(/\bcontent\s*=\s*["']([^"']+)["']/i)?.[1];
+    addMediaCandidate(results, content, pageUrl);
+  }
+  const elementPattern = /<(?:img|video|audio|source)\b[^>]*>/gi;
+  for (const tag of source.match(elementPattern) || []) {
+    const candidate = tag.match(/\b(?:src|data-src|data-original)\s*=\s*["']([^"']+)["']/i)?.[1];
+    addMediaCandidate(results, candidate, pageUrl);
+  }
+  return results.slice(0, maxItems);
+}
+
+async function inspectPageMedia(url, config) {
+  const response = await safeFetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+      accept: "text/html,application/xhtml+xml,image/avif,image/webp,image/*,video/*;q=0.8"
+    }
+  });
+  if (!response.ok) throw new Error(`האתר החזיר שגיאה ${response.status}.`);
+  const contentType = response.headers.get("content-type") || "";
+  if (/^(image|video|audio)\//i.test(contentType)) {
+    return {
+      title: path.basename(new URL(url).pathname) || "קובץ מדיה",
+      channel: new URL(url).hostname,
+      duration: 0,
+      webpageUrl: url,
+      mediaKind: contentType.split("/")[0],
+      mediaCount: 1
+    };
+  }
+  if (!/html|xhtml/i.test(contentType)) throw new Error("לא נמצאה מדיה בקישור.");
+  const declaredLength = Number(response.headers.get("content-length")) || 0;
+  if (declaredLength > 5 * 1024 * 1024) throw new Error("דף האינטרנט גדול מדי לבדיקה בטוחה.");
+  const html = (await response.text()).slice(0, 5 * 1024 * 1024);
+  const mediaUrls = extractMediaUrlsFromHtml(html, url, config.maxMediaItems);
+  if (!mediaUrls.length) throw new Error("לא נמצאו תמונות, וידאו או אודיו ציבוריים בדף.");
+  const title = decodeHtml(
+    html.match(/<meta\b[^>]*(?:property|name)=["']og:title["'][^>]*content=["']([^"']+)/i)?.[1]
+    || html.match(/<title[^>]*>([^<]*)/i)?.[1]
+    || "מדיה מהאתר"
+  ).trim();
+  return {
+    title,
+    channel: new URL(url).hostname,
+    duration: 0,
+    webpageUrl: url,
+    mediaKind: "gallery",
+    mediaCount: mediaUrls.length
+  };
+}
+
 export async function inspectUrl(url, config) {
+  await assertPublicUrl(url);
   let info;
   try {
     const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
@@ -222,16 +370,19 @@ export async function inspectUrl(url, config) {
     }
     if (!info) throw lastError;
   } catch (error) {
-    if (!/(^|\.)vimeo\.com$/i.test(new URL(url).hostname)) throw error;
-    const vimeo = await getVimeoConfig(url);
-    info = {
-      id: String(vimeo.video?.id || ""),
-      extractor_key: "Vimeo",
-      title: vimeo.video?.title,
-      uploader: vimeo.video?.owner?.name,
-      duration: vimeo.video?.duration,
-      webpage_url: url
-    };
+    if (/(^|\.)vimeo\.com$/i.test(new URL(url).hostname)) {
+      const vimeo = await getVimeoConfig(url);
+      info = {
+        id: String(vimeo.video?.id || ""),
+        extractor_key: "Vimeo",
+        title: vimeo.video?.title,
+        uploader: vimeo.video?.owner?.name,
+        duration: vimeo.video?.duration,
+        webpage_url: url
+      };
+    } else {
+      return inspectPageMedia(url, config);
+    }
   }
   return {
     id: info.id,
@@ -239,7 +390,9 @@ export async function inspectUrl(url, config) {
     title: info.title || "ללא כותרת",
     channel: info.channel || info.uploader || "לא ידוע",
     duration: Number(info.duration) || 0,
-    webpageUrl: info.webpage_url || url
+    webpageUrl: info.webpage_url || url,
+    mediaKind: "video",
+    mediaCount: 1
   };
 }
 
@@ -255,13 +408,14 @@ export function videoFormatForHeight(maxHeight = 720) {
 }
 
 export async function download(url, kind, config, onProgress, { maxHeight = 720 } = {}) {
+  await assertPublicUrl(url);
   await fs.promises.mkdir(config.tempDir, { recursive: true });
   const jobDir = path.join(config.tempDir, crypto.randomUUID());
   await fs.promises.mkdir(jobDir);
   const outputTemplate = path.join(jobDir, "%(title).80B [%(id)s].%(ext)s");
   const common = [
     "--no-playlist", "--windows-filenames", "--trim-filenames", "120",
-    "--concurrent-fragments", "4",
+    "--concurrent-fragments", "8",
     "--socket-timeout", "25",
     "--retries", "5",
     "--fragment-retries", "8",
@@ -420,31 +574,100 @@ async function downloadInstagramEmbed(url, jobDir) {
   return files;
 }
 
+async function downloadPageMedia(url, jobDir, config) {
+  const pageResponse = await safeFetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+      accept: "text/html,application/xhtml+xml,image/avif,image/webp,image/*,video/*;q=0.8"
+    }
+  });
+  if (!pageResponse.ok) throw new Error(`האתר החזיר שגיאה ${pageResponse.status}.`);
+  const pageType = pageResponse.headers.get("content-type") || "";
+  let mediaUrls;
+  if (/^(image|video|audio)\//i.test(pageType)) {
+    mediaUrls = [url];
+  } else {
+    if (!/html|xhtml/i.test(pageType)) throw new Error("הקישור אינו דף או קובץ מדיה נתמך.");
+    const declaredLength = Number(pageResponse.headers.get("content-length")) || 0;
+    if (declaredLength > 5 * 1024 * 1024) throw new Error("דף האינטרנט גדול מדי לבדיקה בטוחה.");
+    const html = (await pageResponse.text()).slice(0, 5 * 1024 * 1024);
+    mediaUrls = extractMediaUrlsFromHtml(html, url, config.maxMediaItems);
+  }
+  if (!mediaUrls.length) throw new Error("לא נמצאה מדיה ציבורית שניתן להוריד מהדף.");
+
+  const files = new Array(mediaUrls.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < mediaUrls.length) {
+      const index = cursor++;
+      const mediaUrl = mediaUrls[index];
+      try {
+        const response = mediaUrl === url && /^(image|video|audio)\//i.test(pageType)
+          ? pageResponse
+          : await safeFetch(mediaUrl, {
+              headers: {
+                "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+                referer: url,
+                accept: "image/avif,image/webp,image/*,video/*,audio/*;q=0.9,*/*;q=0.5"
+              }
+            });
+        if (!response.ok) continue;
+        const type = response.headers.get("content-type") || "";
+        const extension = mediaExtension(type, mediaUrl);
+        if (!extension || !/^(image|video|audio)\//i.test(type)) continue;
+        const filePath = path.join(jobDir, `${String(index + 1).padStart(2, "0")}${extension}`);
+        await writeResponseToFile(response, filePath, null, config.maxBytes);
+        files[index] = filePath;
+      } catch (error) {
+        console.warn(`Media item ${index + 1} skipped: ${String(error?.message || error).slice(0, 180)}`);
+      }
+    }
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(config.mediaConcurrency, mediaUrls.length) },
+    () => worker()
+  ));
+  const completed = files.filter(Boolean);
+  if (!completed.length) throw new Error("קישורי המדיה נמצאו, אך האתר חסם את הורדת הקבצים.");
+  return completed;
+}
+
 export async function downloadGallery(url, config) {
+  await assertPublicUrl(url);
   await fs.promises.mkdir(config.tempDir, { recursive: true });
   const jobDir = path.join(config.tempDir, crypto.randomUUID());
   await fs.promises.mkdir(jobDir);
   try {
     await run(config.galleryDlPath, [
       "--destination", jobDir,
+      "--range", `1-${config.maxMediaItems}`,
+      "--filesize-max", String(config.maxBytes),
+      "--retries", "4",
+      "--timeout", "25",
       "--no-part",
       "--no-mtime",
+      "--no-input",
       "--", url
-    ]);
+    ], { timeoutMs: 5 * 60_000 });
     const files = await listFilesRecursively(jobDir);
     if (!files.length) throw new Error("לא נמצאו תמונות או סרטונים בפוסט.");
-    return files;
+    return files.slice(0, config.maxMediaItems);
   } catch (error) {
+    await fs.promises.rm(jobDir, { recursive: true, force: true });
+    await fs.promises.mkdir(jobDir, { recursive: true });
     if (/instagram\.com$/i.test(new URL(url).hostname)) {
       try {
         return await downloadInstagramEmbed(url, jobDir);
       } catch (fallbackError) {
-        await fs.promises.rm(jobDir, { recursive: true, force: true });
-        throw fallbackError;
+        console.warn(`Instagram fallback failed: ${String(fallbackError?.message || fallbackError).slice(0, 180)}`);
       }
     }
-    await fs.promises.rm(jobDir, { recursive: true, force: true });
-    throw error;
+    try {
+      return await downloadPageMedia(url, jobDir, config);
+    } catch (fallbackError) {
+      await fs.promises.rm(jobDir, { recursive: true, force: true });
+      throw fallbackError;
+    }
   }
 }
 

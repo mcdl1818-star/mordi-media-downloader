@@ -9,12 +9,12 @@ test("maps every video quality callback to a bounded height", () => {
   assert.deepEqual(downloadSelection("v1080"), { kind: "video", height: 1080, label: "1080p" });
 });
 
-test("builds compact Telegram buttons for four qualities and MP3", () => {
+test("builds compact Telegram buttons for qualities, MP3 and all media", () => {
   const keyboard = formatKeyboard("abc123");
   const buttons = keyboard.inline_keyboard.flat();
 
   assert.deepEqual(buttons.map(button => button.text), [
-    "🎬 360p", "🎬 480p", "🎬 720p", "🎬 1080p", "🎵 MP3"
+    "🎬 360p", "🎬 480p", "🎬 720p", "🎬 1080p", "🎵 MP3", "🖼 כל המדיה"
   ]);
   assert.ok(buttons.every(button => button.callback_data.length <= 64));
 });
@@ -22,4 +22,8 @@ test("builds compact Telegram buttons for four qualities and MP3", () => {
 test("rejects unknown callback kinds", () => {
   assert.equal(downloadSelection("video"), null);
   assert.equal(downloadSelection("v999"), null);
+});
+
+test("maps the all-media action", () => {
+  assert.deepEqual(downloadSelection("gallery"), { kind: "gallery", height: null, label: "גלריה" });
 });

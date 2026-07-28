@@ -30,6 +30,8 @@ export function readConfig() {
     galleryDlPath: process.env.GALLERY_DL_PATH?.trim() || "gallery-dl",
     ffmpegPath: process.env.FFMPEG_PATH?.trim() || "ffmpeg",
     maxBytes: (Number(process.env.MAX_FILE_SIZE_MB) || 49) * 1024 * 1024,
+    maxMediaItems: Math.max(1, Math.min(30, Number(process.env.MAX_MEDIA_ITEMS) || 15)),
+    mediaConcurrency: Math.max(1, Math.min(6, Number(process.env.MEDIA_CONCURRENCY) || 3)),
     tempTtlMs: (Number(process.env.TEMP_TTL_MINUTES) || 30) * 60_000,
     tempDir: path.resolve("temp"),
     youtubeCookiesPath: path.resolve("temp", "youtube-cookies.txt"),

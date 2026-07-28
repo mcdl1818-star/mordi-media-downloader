@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   extractSupportedMediaUrl,
+  extractMediaUrlsFromHtml,
   isYouTubeBlockedError,
   requiresYouTubeAuthentication,
   validateMediaUrl,
@@ -28,9 +29,27 @@ test("extracts a supported URL from surrounding Telegram text", () => {
   assert.equal(result.url, "https://youtu.be/jNQXAC9IVRw");
 });
 
-test("rejects unsupported and insecure URLs", () => {
+test("accepts arbitrary public HTTPS sites and rejects insecure/private URLs", () => {
+  assert.equal(validateMediaUrl("https://example.com/article").platform, "אתר כללי");
   assert.throws(() => validateMediaUrl("http://youtube.com/watch?v=1"));
-  assert.throws(() => validateMediaUrl("https://example.com/video"));
+  assert.throws(() => validateMediaUrl("https://localhost/video"));
+  assert.throws(() => validateMediaUrl("https://127.0.0.1/video"));
+  assert.throws(() => validateMediaUrl("https://192.168.1.5/photo.jpg"));
+});
+
+test("extracts and deduplicates common media references from HTML", () => {
+  const html = `
+    <meta property="og:image" content="/cover.jpg">
+    <meta content="https://cdn.example.com/movie.mp4" property="og:video">
+    <img data-src="/cover.jpg">
+    <video><source src="/clip.webm"></video>
+    <img src="data:image/png;base64,ignored">
+  `;
+  assert.deepEqual(extractMediaUrlsFromHtml(html, "https://example.com/post", 10), [
+    "https://example.com/cover.jpg",
+    "https://cdn.example.com/movie.mp4",
+    "https://example.com/clip.webm"
+  ]);
 });
 
 test("builds bounded video format selectors with a safe fallback", () => {

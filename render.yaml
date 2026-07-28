@@ -15,6 +15,10 @@ services:
         value: https://mordi-media-downloader.onrender.com
       - key: MAX_FILE_SIZE_MB
         value: "49"
+      - key: MAX_MEDIA_ITEMS
+        value: "15"
+      - key: MEDIA_CONCURRENCY
+        value: "3"
       - key: TEMP_TTL_MINUTES
         value: "30"
       - key: YOUTUBE_PROXY_URL
