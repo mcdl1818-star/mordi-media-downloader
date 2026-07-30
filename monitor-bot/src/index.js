@@ -27,6 +27,10 @@ async function deliver(item, subscription, { historical = false } = {}) {
   const caption = historical
     ? `👋 סרטון קודם לזיהוי אצל ${subscription.label}\n${item.title}\n${item.url}`
     : `🎬 פרסום חדש אצל ${subscription.label}\n${item.title}\n${item.url}`;
+  if (historical) {
+    await telegram.sendMessage(config.allowedUserId, caption);
+    return;
+  }
   if (config.sendMode === "video") {
     let file;
     try {
