@@ -1,0 +1,16 @@
+name: Wake creator monitor
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake service and start scan
+        run: |
+          curl --fail --silent --show-error \
+            --retry 4 --retry-delay 20 --max-time 180 \
+            https://mordi-creator-monitor.onrender.com/scan
