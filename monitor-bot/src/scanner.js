@@ -11,6 +11,11 @@ const PLATFORM_RULES = [
   ["X", /(^|\.)x\.com$|(^|\.)twitter\.com$/]
 ];
 
+const EXTRACTOR_ARGS = [
+  "--js-runtimes", "node",
+  "--extractor-args", "twitter:api=syndication"
+];
+
 export function validateCreatorUrl(input) {
   let url;
   try {
@@ -91,7 +96,8 @@ function cookiesPathFor(platform, config) {
 async function scanYtDlp(creator, config) {
   const args = [
     "--flat-playlist", "--playlist-end", String(config.maxItems),
-    "--dump-single-json", "--ignore-errors", "--no-warnings"
+    "--dump-single-json", "--ignore-errors", "--no-warnings",
+    ...EXTRACTOR_ARGS
   ];
   const cookiesPath = cookiesPathFor(creator.platform, config);
   if (cookiesPath) args.push("--cookies", cookiesPath);
@@ -254,18 +260,62 @@ export async function downloadVideo(item, config) {
   const output = path.join(directory, "%(id)s.%(ext)s");
   const args = [
     "--no-playlist",
+    ...EXTRACTOR_ARGS,
     "-f", "b[ext=mp4][height<=720]/b[height<=720]/b",
     "-o", output
   ];
   const cookiesPath = cookiesPathFor(item.platform, config);
   if (cookiesPath) args.push("--cookies", cookiesPath);
   args.push("--", item.url);
-  await run(config.ytDlpPath, args, 10 * 60_000);
+  try {
+    await run(config.ytDlpPath, args, 10 * 60_000);
+  } catch (error) {
+    if (item.platform !== "Instagram") throw error;
+    await downloadInstagramEmbed(item.url, directory);
+  }
   const files = (await fs.promises.readdir(directory))
     .filter(name => !/\.(part|ytdl)$/.test(name))
     .map(name => path.join(directory, name));
   if (!files.length) throw new Error("הקובץ לא הורד");
   return files[0];
+}
+
+function decodeInstagramJsonString(value) {
+  return JSON.parse(`"${value}"`).replace(/\\\//g, "/").replace(/\\u0025/g, "%");
+}
+
+function extractInstagramValues(html, field) {
+  const values = [];
+  const marker = `\\\"${field}\\\":\\\"`;
+  let cursor = 0;
+  while ((cursor = html.indexOf(marker, cursor)) !== -1) {
+    const start = cursor + marker.length;
+    const end = html.indexOf("\\\"", start);
+    if (end === -1) break;
+    const value = decodeInstagramJsonString(html.slice(start, end));
+    if (!values.includes(value)) values.push(value);
+    cursor = end + 2;
+  }
+  return values;
+}
+
+async function downloadInstagramEmbed(url, directory) {
+  const match = new URL(url).pathname.match(/^\/(p|reel)\/([^/]+)/);
+  if (!match) throw new Error("לא ניתן לזהות את פוסט Instagram");
+  const response = await fetch(`https://www.instagram.com/${match[1]}/${match[2]}/embed/captioned/`, {
+    signal: AbortSignal.timeout(20_000),
+    headers: { "user-agent": "Mozilla/5.0" }
+  });
+  if (!response.ok) throw new Error(`Instagram embed HTTP ${response.status}`);
+  const html = await response.text();
+  const videoUrls = extractInstagramValues(html, "video_url");
+  if (!videoUrls.length) throw new Error("לא נמצא סרטון ציבורי ב-Instagram");
+  const media = await fetch(videoUrls[0], {
+    signal: AbortSignal.timeout(60_000),
+    headers: { "user-agent": "Mozilla/5.0", referer: "https://www.instagram.com/" }
+  });
+  if (!media.ok) throw new Error(`Instagram media HTTP ${media.status}`);
+  await fs.promises.writeFile(path.join(directory, `${match[2]}.mp4`), Buffer.from(await media.arrayBuffer()));
 }
 
 export async function cleanupVideo(file) {
