@@ -47,11 +47,10 @@ function run(command, args, timeoutMs = 90_000) {
 }
 
 function absoluteMediaUrl(item, platform) {
-  const candidate = item.webpage_url || item.url || item.original_url;
-  if (typeof candidate === "string" && /^https:\/\//.test(candidate)) return candidate;
   if (platform === "YouTube" && item.id) return `https://www.youtube.com/watch?v=${item.id}`;
-  if (platform === "Instagram" && item.shortcode) {
-    return `https://www.instagram.com/${item.is_video || item.video_url ? "reel" : "p"}/${item.shortcode}/`;
+  const instagramCode = item.post_shortcode || item.shortcode;
+  if (platform === "Instagram" && instagramCode) {
+    return item.post_url || `https://www.instagram.com/${item.is_video || item.video_url ? "reel" : "p"}/${instagramCode}/`;
   }
   if (platform === "X" && (item.tweet_id || item.id)) {
     return `https://x.com/i/web/status/${item.tweet_id || item.id}`;
@@ -59,6 +58,8 @@ function absoluteMediaUrl(item, platform) {
   if (platform === "TikTok" && item.id && item.author?.unique_id) {
     return `https://www.tiktok.com/@${item.author.unique_id}/video/${item.id}`;
   }
+  const candidate = item.post_url || item.webpage_url || item.url || item.original_url;
+  if (typeof candidate === "string" && /^https:\/\//.test(candidate)) return candidate;
   return "";
 }
 
@@ -102,10 +103,10 @@ async function scanYtDlp(creator, config) {
 
 function collectObjects(value, output = []) {
   if (!value || typeof value !== "object") return output;
-  if (value.id || value.post_id || value.tweet_id || value.shortcode) {
+  if (value.id || value.post_id || value.tweet_id || value.shortcode || value.post_shortcode) {
     output.push({
       ...value,
-      id: value.id || value.post_id || value.tweet_id || value.shortcode,
+      id: value.id || value.post_id || value.tweet_id || value.shortcode || value.post_shortcode,
       webpage_url: value.post_url || value.url || value.webpage_url
     });
   }
