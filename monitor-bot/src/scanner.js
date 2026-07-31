@@ -50,6 +50,15 @@ function absoluteMediaUrl(item, platform) {
   const candidate = item.webpage_url || item.url || item.original_url;
   if (typeof candidate === "string" && /^https:\/\//.test(candidate)) return candidate;
   if (platform === "YouTube" && item.id) return `https://www.youtube.com/watch?v=${item.id}`;
+  if (platform === "Instagram" && item.shortcode) {
+    return `https://www.instagram.com/${item.is_video || item.video_url ? "reel" : "p"}/${item.shortcode}/`;
+  }
+  if (platform === "X" && (item.tweet_id || item.id)) {
+    return `https://x.com/i/web/status/${item.tweet_id || item.id}`;
+  }
+  if (platform === "TikTok" && item.id && item.author?.unique_id) {
+    return `https://www.tiktok.com/@${item.author.unique_id}/video/${item.id}`;
+  }
   return "";
 }
 
@@ -64,10 +73,18 @@ function normalizeItems(entries, platform) {
       id: `${platform}:${id}`,
       url,
       title: String(item.title || item.description || "פרסום חדש").slice(0, 300),
-      timestamp: Number(item.timestamp || item.release_timestamp || 0)
+      timestamp: Number(item.timestamp || item.release_timestamp || item.date || 0),
+      platform
     });
   }
   return [...new Map(output.map(item => [item.id, item])).values()];
+}
+
+function cookiesPathFor(platform, config) {
+  const platformPath = config.platformCookies?.[platform];
+  if (platformPath && fs.existsSync(platformPath)) return platformPath;
+  if (config.cookiesPath && fs.existsSync(config.cookiesPath)) return config.cookiesPath;
+  return "";
 }
 
 async function scanYtDlp(creator, config) {
@@ -75,9 +92,11 @@ async function scanYtDlp(creator, config) {
     "--flat-playlist", "--playlist-end", String(config.maxItems),
     "--dump-single-json", "--ignore-errors", "--no-warnings"
   ];
-  if (config.cookiesPath && fs.existsSync(config.cookiesPath)) args.push("--cookies", config.cookiesPath);
+  const cookiesPath = cookiesPathFor(creator.platform, config);
+  if (cookiesPath) args.push("--cookies", cookiesPath);
   args.push("--", creator.url);
   const parsed = JSON.parse(await run(config.ytDlpPath, args));
+  if (!parsed) return [];
   return normalizeItems(parsed.entries || [parsed], creator.platform);
 }
 
@@ -96,18 +115,115 @@ function collectObjects(value, output = []) {
   return output;
 }
 
-async function scanGalleryDl(creator, config) {
+function collectRedirectUrls(value, output = []) {
+  if (!Array.isArray(value)) return output;
+  if (value[0] === 6 && typeof value[1] === "string") output.push(value[1]);
+  for (const child of value) {
+    if (Array.isArray(child)) collectRedirectUrls(child, output);
+  }
+  return output;
+}
+
+async function scanGalleryUrl(url, creator, config, visited = new Set()) {
+  if (visited.has(url) || visited.size >= 8) return [];
+  visited.add(url);
   const args = ["--dump-json", "--range", `1-${config.maxItems}`];
-  if (config.cookiesPath && fs.existsSync(config.cookiesPath)) args.push("--cookies", config.cookiesPath);
-  args.push("--", creator.url);
+  const cookiesPath = cookiesPathFor(creator.platform, config);
+  if (cookiesPath) args.push("--cookies", cookiesPath);
+  args.push("--", url);
   const raw = await run(config.galleryDlPath, args);
-  const objects = raw.split(/\r?\n/).filter(Boolean).flatMap(line => {
-    try { return collectObjects(JSON.parse(line)); } catch { return []; }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = raw.split(/\r?\n/).filter(Boolean).flatMap(line => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    });
+  }
+  const direct = normalizeItems(collectObjects(parsed), creator.platform);
+  if (direct.length) return direct;
+  const results = [];
+  for (const redirect of [...new Set(collectRedirectUrls(parsed))]) {
+    results.push(...await scanGalleryUrl(redirect, creator, config, visited));
+  }
+  return [...new Map(results.map(item => [item.id, item])).values()];
+}
+
+async function scanGalleryDl(creator, config) {
+  return scanGalleryUrl(creator.url, creator, config);
+}
+
+function netscapeCookieHeader(file) {
+  if (!file || !fs.existsSync(file)) return "";
+  return fs.readFileSync(file, "utf8").split(/\r?\n/)
+    .filter(line => line && !line.startsWith("#"))
+    .map(line => line.split("\t"))
+    .filter(parts => parts.length >= 7)
+    .map(parts => `${parts[5]}=${parts[6]}`)
+    .join("; ");
+}
+
+function htmlCandidates(html, creator, maxItems) {
+  const patterns = {
+    Instagram: /(?:https?:\\?\/\\?\/(?:www\.)?instagram\.com)?\\?\/(reel|p)\\?\/([A-Za-z0-9_-]+)/g,
+    Facebook: /(?:https?:\\?\/\\?\/(?:www\.)?facebook\.com)?\\?\/(?:reel|watch\/?\?v=|[^"'\\]+\/videos\/)(\d+)/g,
+    TikTok: /(?:https?:\\?\/\\?\/(?:www\.)?tiktok\.com)?\\?\/@([^/"'\\]+)\\?\/video\\?\/(\d+)/g,
+    X: /(?:https?:\\?\/\\?\/(?:www\.)?(?:x|twitter)\.com)?\\?\/([^/"'\\]+)\\?\/status\\?\/(\d+)/g
+  };
+  const regex = patterns[creator.platform];
+  if (!regex) return [];
+  const items = [];
+  for (const match of html.matchAll(regex)) {
+    let id;
+    let url;
+    if (creator.platform === "Instagram") {
+      id = match[2];
+      url = `https://www.instagram.com/${match[1]}/${id}/`;
+    } else if (creator.platform === "Facebook") {
+      id = match[1];
+      url = `https://www.facebook.com/reel/${id}`;
+    } else if (creator.platform === "TikTok") {
+      id = match[2];
+      url = `https://www.tiktok.com/@${match[1]}/video/${id}`;
+    } else {
+      id = match[2];
+      url = `https://x.com/${match[1]}/status/${id}`;
+    }
+    items.push({ id: `${creator.platform}:${id}`, url, title: "פרסום חדש", timestamp: 0, platform: creator.platform });
+  }
+  return [...new Map(items.map(item => [item.id, item])).values()].slice(0, maxItems);
+}
+
+async function scanProfileHtml(creator, config) {
+  const cookiesPath = cookiesPathFor(creator.platform, config);
+  const base = creator.url.replace(/\/$/, "");
+  const target = creator.platform === "Facebook" ? `${base}/reels/`
+    : creator.platform === "X" ? `${base}/media`
+      : creator.url;
+  const response = await fetch(target, {
+    redirect: "follow",
+    signal: AbortSignal.timeout(15_000),
+    headers: {
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+      "accept-language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
+      cookie: netscapeCookieHeader(cookiesPath)
+    }
   });
-  return normalizeItems(objects, creator.platform);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return htmlCandidates(await response.text(), creator, config.maxItems);
 }
 
 export async function scanCreator(creator, config) {
+  const needsSession = ["Instagram", "Facebook", "X"].includes(creator.platform);
+  if (needsSession && !cookiesPathFor(creator.platform, config)) {
+    try {
+      const publicItems = await scanProfileHtml(creator, config);
+      if (publicItems.length) return publicItems;
+    } catch {
+      // Authenticated extractors below are intentionally skipped without a session file.
+    }
+    throw new Error(`AUTH_REQUIRED:${creator.platform}`);
+  }
   let firstError;
   try {
     const items = await scanYtDlp(creator, config);
@@ -117,6 +233,12 @@ export async function scanCreator(creator, config) {
   }
   try {
     const items = await scanGalleryDl(creator, config);
+    if (items.length) return items;
+  } catch (error) {
+    firstError ||= error;
+  }
+  try {
+    const items = await scanProfileHtml(creator, config);
     if (items.length) return items;
   } catch (error) {
     firstError ||= error;
@@ -134,7 +256,8 @@ export async function downloadVideo(item, config) {
     "-f", "b[ext=mp4][height<=720]/b[height<=720]/b",
     "-o", output
   ];
-  if (config.cookiesPath && fs.existsSync(config.cookiesPath)) args.push("--cookies", config.cookiesPath);
+  const cookiesPath = cookiesPathFor(item.platform, config);
+  if (cookiesPath) args.push("--cookies", cookiesPath);
   args.push("--", item.url);
   await run(config.ytDlpPath, args, 10 * 60_000);
   const files = (await fs.promises.readdir(directory))

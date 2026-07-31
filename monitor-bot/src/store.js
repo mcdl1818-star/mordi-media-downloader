@@ -9,7 +9,7 @@ export class Store {
     this.telegram = telegram;
     this.chatId = chatId;
     this.localFile = path.join(directory, "subscriptions.json");
-    this.state = { version: 2, paused: false, subscriptions: [] };
+    this.state = { version: 3, paused: false, subscriptions: [], auth: {} };
     this.pinnedMessageId = null;
   }
 
@@ -21,6 +21,7 @@ export class Store {
       if (pinned?.caption === STATE_CAPTION && pinned.document?.file_id) {
         await this.telegram.downloadFile(pinned.document.file_id, this.localFile);
         this.state = JSON.parse(await fs.promises.readFile(this.localFile, "utf8"));
+        this.state.auth ||= {};
         this.pinnedMessageId = pinned.message_id;
         return;
       }
@@ -29,6 +30,7 @@ export class Store {
     }
     try {
       this.state = JSON.parse(await fs.promises.readFile(this.localFile, "utf8"));
+      this.state.auth ||= {};
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
