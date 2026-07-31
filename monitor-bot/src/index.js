@@ -10,6 +10,7 @@ const config = readConfig();
 const telegram = new Telegram(config.token);
 const store = new Store(config.dataDir, telegram, config.allowedUserId);
 await store.load();
+config.platformCookies = {};
 let offset = 0;
 let scanRunning = false;
 
@@ -20,8 +21,35 @@ const help = `שלח קישור לפרופיל או לערוץ כדי להתחי
 /check — בדיקה מיידית
 /pause — השהיית כל המעקבים
 /resume — חידוש המעקבים
+/auth — מצב ההתחברות לפלטפורמות
 
 בעת הוספה נשמר המצב הנוכחי, ולכן לא יישלח תוכן ישן.`;
+
+const AUTH_FILES = {
+  "instagram-cookies.txt": "Instagram",
+  "facebook-cookies.txt": "Facebook",
+  "tiktok-cookies.txt": "TikTok",
+  "x-cookies.txt": "X",
+  "twitter-cookies.txt": "X"
+};
+
+async function hydrateAuth(platform) {
+  const auth = store.state.auth?.[platform];
+  if (!auth?.fileId) return false;
+  const destination = `${config.dataDir}/${platform.toLowerCase()}-cookies.txt`;
+  await telegram.downloadFile(auth.fileId, destination);
+  config.platformCookies[platform] = destination;
+  return true;
+}
+
+for (const platform of Object.keys(store.state.auth || {})) {
+  await hydrateAuth(platform).catch(error => console.warn(`Auth ${platform}:`, error.message));
+}
+
+function authRequiredMessage(platform) {
+  const filename = platform === "X" ? "x-cookies.txt" : `${platform.toLowerCase()}-cookies.txt`;
+  return `🔐 ${platform} דורש session כדי לקרוא פרופילים משרת ענן.\nשלח לבוט קובץ cookies בפורמט Netscape בשם ${filename}, ולאחר האישור שלח שוב את קישור הפרופיל. הקובץ נשמר באופן פרטי ב-Telegram ולא ב-GitHub.`;
+}
 
 async function deliver(item, subscription, { historical = false } = {}) {
   const caption = historical
@@ -111,10 +139,19 @@ async function addSubscription(chatId, text) {
       await deliver(item, subscription, { historical: true });
     }
   } catch (error) {
+    const errorText = String(error.message);
+    if (errorText.startsWith("AUTH_REQUIRED:")) {
+      await telegram.call("editMessageText", {
+        chat_id: chatId,
+        message_id: status.message_id,
+        text: authRequiredMessage(errorText.split(":")[1])
+      });
+      return;
+    }
     await telegram.call("editMessageText", {
       chat_id: chatId,
       message_id: status.message_id,
-      text: `❌ לא הצלחתי לקרוא את הפרופיל: ${String(error.message).slice(0, 250)}`
+      text: `❌ לא הצלחתי לקרוא את הפרופיל: ${errorText.slice(0, 250)}`
     });
   }
 }
@@ -123,7 +160,29 @@ async function handleMessage(message) {
   if (String(message.from?.id || "") !== config.allowedUserId) return;
   const chatId = message.chat.id;
   const text = message.text?.trim() || "";
+  if (message.document) {
+    const filename = message.document.file_name?.toLowerCase() || "";
+    const platform = AUTH_FILES[filename];
+    if (!platform) {
+      return telegram.sendMessage(chatId, `שם הקובץ אינו מוכר. שמות נתמכים:\n${[...new Set(Object.keys(AUTH_FILES))].join("\n")}`);
+    }
+    store.state.auth ||= {};
+    store.state.auth[platform] = {
+      fileId: message.document.file_id,
+      filename,
+      updatedAt: new Date().toISOString()
+    };
+    await hydrateAuth(platform);
+    await store.save();
+    return telegram.sendMessage(chatId, `✅ ההתחברות ל-${platform} נשמרה בענן. אפשר לשלוח עכשיו את קישור הפרופיל.`);
+  }
   if (text === "/start" || text === "/help") return telegram.sendMessage(chatId, help);
+  if (text === "/auth") {
+    const lines = ["Instagram", "Facebook", "TikTok", "X"].map(platform =>
+      `${config.platformCookies[platform] ? "✅" : "⬜"} ${platform}`
+    );
+    return telegram.sendMessage(chatId, `מצב התחברות:\n${lines.join("\n")}`);
+  }
   if (text === "/list") {
     const lines = store.state.subscriptions.map((item, index) =>
       `${index + 1}. ${item.platform} — ${item.label}${item.lastError ? " ⚠️" : ""}`
