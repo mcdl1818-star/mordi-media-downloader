@@ -86,6 +86,56 @@ function normalizeItems(entries, platform) {
   return [...new Map(output.map(item => [item.id, item])).values()];
 }
 
+function decodeXml(value = "") {
+  return value.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+}
+
+export function parseYouTubeFeed(xml, maxItems = 15) {
+  const items = [];
+  for (const entry of String(xml).matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
+    const body = entry[1];
+    const id = body.match(/<yt:videoId>([^<]+)<\/yt:videoId>/)?.[1]?.trim();
+    if (!id) continue;
+    const title = decodeXml(body.match(/<title>([\s\S]*?)<\/title>/)?.[1]?.trim() || "פרסום חדש");
+    const published = body.match(/<published>([^<]+)<\/published>/)?.[1];
+    items.push({
+      id: `YouTube:${id}`,
+      url: `https://www.youtube.com/watch?v=${id}`,
+      title: title.slice(0, 300),
+      timestamp: published ? Math.floor(Date.parse(published) / 1000) : 0,
+      platform: "YouTube"
+    });
+  }
+  return items.slice(0, maxItems);
+}
+
+async function youtubeChannelId(url) {
+  const parsed = new URL(url);
+  const direct = parsed.pathname.match(/^\/channel\/(UC[\w-]{20,})/i)?.[1];
+  if (direct) return direct;
+  const response = await fetch(url, {
+    redirect: "follow",
+    signal: AbortSignal.timeout(15_000),
+    headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36" }
+  });
+  if (!response.ok) throw new Error(`YouTube channel HTTP ${response.status}`);
+  const html = await response.text();
+  return html.match(/"(?:externalId|channelId)":"(UC[\w-]{20,})"/)?.[1]
+    || html.match(/youtube\.com\/channel\/(UC[\w-]{20,})/)?.[1]
+    || "";
+}
+
+async function scanYouTubeFeed(creator, config) {
+  const channelId = await youtubeChannelId(creator.url);
+  if (!channelId) throw new Error("לא ניתן לזהות את מזהה ערוץ YouTube");
+  const response = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${encodeURIComponent(channelId)}`, {
+    signal: AbortSignal.timeout(15_000),
+    headers: { "user-agent": "Mozilla/5.0" }
+  });
+  if (!response.ok) throw new Error(`YouTube feed HTTP ${response.status}`);
+  return parseYouTubeFeed(await response.text(), config.maxItems);
+}
+
 function cookiesPathFor(platform, config) {
   const platformPath = config.platformCookies?.[platform];
   if (platformPath && fs.existsSync(platformPath)) return platformPath;
@@ -221,6 +271,14 @@ async function scanProfileHtml(creator, config) {
 }
 
 export async function scanCreator(creator, config) {
+  if (creator.platform === "YouTube") {
+    try {
+      const items = await scanYouTubeFeed(creator, config);
+      if (items.length) return items;
+    } catch {
+      // Continue to yt-dlp, which also covers playlists and unusual channel URLs.
+    }
+  }
   const needsSession = ["Instagram", "Facebook", "X"].includes(creator.platform);
   if (needsSession && !cookiesPathFor(creator.platform, config)) {
     try {
