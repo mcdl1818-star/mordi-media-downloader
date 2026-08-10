@@ -55,6 +55,11 @@ function absoluteMediaUrl(item, platform) {
   if (platform === "YouTube" && item.id) return `https://www.youtube.com/watch?v=${item.id}`;
   const instagramCode = item.post_shortcode || item.shortcode;
   if (platform === "Instagram" && instagramCode) {
+    if (item.type === "story" || item.expires) {
+      const username = item.username || item.user?.username || item.owner?.username;
+      const mediaId = item.media_id || item.id || item.post_id;
+      if (username && mediaId) return `https://www.instagram.com/stories/${username}/${mediaId}/`;
+    }
     return item.post_url || `https://www.instagram.com/${item.is_video || item.video_url ? "reel" : "p"}/${instagramCode}/`;
   }
   if (platform === "X" && (item.tweet_id || item.id)) {
@@ -68,19 +73,33 @@ function absoluteMediaUrl(item, platform) {
   return "";
 }
 
-function normalizeItems(entries, platform) {
+function itemTimestamp(item) {
+  const value = item.timestamp || item.release_timestamp || item.post_date || item.date || 0;
+  if (typeof value === "number") return value;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+}
+
+export function normalizeItems(entries, platform) {
   const output = [];
   for (const item of entries || []) {
     if (!item || typeof item !== "object") continue;
     const url = absoluteMediaUrl(item, platform);
-    const id = String(item.id || item.display_id || url || "");
+    const id = String(item.media_id || item.id || item.display_id || item.post_id || item.shortcode || url || "");
     if (!id || !url) continue;
+    const directMediaUrl = item.video_url || item.display_url;
     output.push({
       id: `${platform}:${id}`,
       url,
-      title: String(item.title || item.description || "פרסום חדש").slice(0, 300),
-      timestamp: Number(item.timestamp || item.release_timestamp || item.date || 0),
-      platform
+      title: String(item.title || item.description || (item.type === "story" || item.expires ? "סטורי חדש" : "פרסום חדש")).slice(0, 300),
+      timestamp: itemTimestamp(item),
+      platform,
+      ...(typeof directMediaUrl === "string" && /^https:\/\//.test(directMediaUrl) ? {
+        directMediaUrl,
+        mediaKind: item.video_url ? "video" : "photo"
+      } : {})
     });
   }
   return [...new Map(output.map(item => [item.id, item])).values()];
@@ -185,6 +204,15 @@ async function scanGalleryUrl(url, creator, config, visited = new Set()) {
   if (visited.has(url) || visited.size >= 8) return [];
   visited.add(url);
   const args = ["--dump-json", "--range", `1-${config.maxItems}`];
+  if (creator.platform === "Instagram") {
+    args.push(
+      "-o", "extractor.instagram.include=posts,reels,stories",
+      "-o", "extractor.instagram.stories.split=true",
+      "-o", "extractor.instagram.order-posts=desc",
+      "-o", `extractor.instagram.max-posts=${config.maxItems}`,
+      "-o", "extractor.sleep-request=2.0-4.0"
+    );
+  }
   const cookiesPath = cookiesPathFor(creator.platform, config);
   if (cookiesPath) args.push("--cookies", cookiesPath);
   args.push("--", url);
@@ -201,7 +229,11 @@ async function scanGalleryUrl(url, creator, config, visited = new Set()) {
   if (direct.length) return direct;
   const results = [];
   for (const redirect of [...new Set(collectRedirectUrls(parsed))]) {
-    results.push(...await scanGalleryUrl(redirect, creator, config, visited));
+    try {
+      results.push(...await scanGalleryUrl(redirect, creator, config, visited));
+    } catch {
+      // A profile can expose posts while stories are unavailable, or vice versa.
+    }
   }
   return [...new Map(results.map(item => [item.id, item])).values()];
 }
@@ -280,15 +312,6 @@ export async function scanCreator(creator, config) {
     }
   }
   const needsSession = ["Instagram", "Facebook", "X"].includes(creator.platform);
-  if (needsSession && !cookiesPathFor(creator.platform, config)) {
-    try {
-      const publicItems = await scanProfileHtml(creator, config);
-      if (publicItems.length) return publicItems;
-    } catch {
-      // Authenticated extractors below are intentionally skipped without a session file.
-    }
-    throw new Error(`AUTH_REQUIRED:${creator.platform}`);
-  }
   let firstError;
   try {
     const items = await scanYtDlp(creator, config);
@@ -308,6 +331,9 @@ export async function scanCreator(creator, config) {
   } catch (error) {
     firstError ||= error;
   }
+  if (needsSession && !cookiesPathFor(creator.platform, config)) {
+    throw new Error(`AUTH_REQUIRED:${creator.platform}`);
+  }
   throw firstError || new Error("לא נמצאו פרסומים ציבוריים בפרופיל.");
 }
 
@@ -316,6 +342,18 @@ export async function downloadVideo(item, config) {
   const directory = path.join(config.tempDir, crypto.randomUUID());
   await fs.promises.mkdir(directory);
   const output = path.join(directory, "%(id)s.%(ext)s");
+  if (item.platform === "Instagram" && item.directMediaUrl) {
+    const response = await fetch(item.directMediaUrl, {
+      signal: AbortSignal.timeout(60_000),
+      headers: { "user-agent": "Mozilla/5.0", referer: "https://www.instagram.com/" }
+    });
+    if (!response.ok) throw new Error(`Instagram media HTTP ${response.status}`);
+    const contentType = response.headers.get("content-type") || "";
+    const extension = contentType.includes("video") || item.mediaKind === "video" ? "mp4" : "jpg";
+    const destination = path.join(directory, `${item.id.replace(/[^A-Za-z0-9_-]/g, "_")}.${extension}`);
+    await fs.promises.writeFile(destination, Buffer.from(await response.arrayBuffer()));
+    return destination;
+  }
   const args = [
     "--no-playlist",
     ...EXTRACTOR_ARGS,

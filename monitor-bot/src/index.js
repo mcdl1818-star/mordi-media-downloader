@@ -60,7 +60,11 @@ async function deliver(item, subscription, { historical = false } = {}) {
     try {
       file = await downloadVideo(item, config);
       if ((await fs.promises.stat(file)).size > config.maxBytes) throw new Error("הקובץ גדול ממגבלת Telegram");
-      await telegram.sendVideo(config.allowedUserId, file, caption);
+      if (item.mediaKind === "photo" || /\.(?:jpe?g|png|webp)$/i.test(file)) {
+        await telegram.sendPhoto(config.allowedUserId, file, caption);
+      } else {
+        await telegram.sendVideo(config.allowedUserId, file, caption);
+      }
       return;
     } catch (error) {
       console.warn(`Video delivery fallback for ${item.url}: ${error.message}`);

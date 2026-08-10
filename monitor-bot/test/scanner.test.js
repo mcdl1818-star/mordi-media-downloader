@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateCreatorUrl, parseYouTubeFeed } from "../src/scanner.js";
+import { validateCreatorUrl, parseYouTubeFeed, normalizeItems } from "../src/scanner.js";
 
 test("accepts supported creator URLs", () => {
   assert.equal(validateCreatorUrl("https://www.youtube.com/@OpenAI").platform, "YouTube");
@@ -17,6 +17,26 @@ test("parses the official YouTube channel feed without an API token", () => {
     title: "A & B",
     timestamp: 1786356000,
     platform: "YouTube"
+  }]);
+});
+
+test("normalizes each Instagram story with its stable ID and direct media", () => {
+  assert.deepEqual(normalizeItems([{
+    media_id: "123456789",
+    shortcode: "ABC",
+    type: "story",
+    expires: "2026-08-11T11:00:00Z",
+    username: "creator",
+    date: "2026-08-10T11:00:00Z",
+    video_url: "https://cdn.example/story.mp4"
+  }], "Instagram"), [{
+    id: "Instagram:123456789",
+    url: "https://www.instagram.com/stories/creator/123456789/",
+    title: "סטורי חדש",
+    timestamp: 1786359600,
+    platform: "Instagram",
+    directMediaUrl: "https://cdn.example/story.mp4",
+    mediaKind: "video"
   }]);
 });
 
