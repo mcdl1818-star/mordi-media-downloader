@@ -37,6 +37,17 @@ export class Telegram {
     return result.result;
   }
 
+  async sendPhoto(chatId, filePath, caption) {
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    form.set("caption", caption.slice(0, 1024));
+    form.set("photo", new Blob([await fs.promises.readFile(filePath)]), filePath.split(/[\\/]/).at(-1));
+    const response = await fetch(`${this.baseUrl}/sendPhoto`, { method: "POST", body: form });
+    const result = await response.json();
+    if (!result.ok) throw new Error(`Telegram sendPhoto: ${result.description}`);
+    return result.result;
+  }
+
   async sendDocument(chatId, filePath, caption) {
     const form = new FormData();
     form.set("chat_id", String(chatId));
