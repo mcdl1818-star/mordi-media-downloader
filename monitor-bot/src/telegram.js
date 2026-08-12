@@ -48,12 +48,12 @@ export class Telegram {
     return result.result;
   }
 
-  async sendDocument(chatId, filePath, caption) {
+  async sendDocument(chatId, filePath, caption, options = {}) {
     const form = new FormData();
     form.set("chat_id", String(chatId));
     form.set("caption", caption);
-    form.set("disable_notification", "true");
-    form.set("document", new Blob([await fs.promises.readFile(filePath)]), "monitor-state.json");
+    form.set("disable_notification", String(options.disableNotification ?? true));
+    form.set("document", new Blob([await fs.promises.readFile(filePath)]), options.filename || "monitor-state.json");
     const response = await fetch(`${this.baseUrl}/sendDocument`, { method: "POST", body: form });
     const result = await response.json();
     if (!result.ok) throw new Error(`Telegram sendDocument: ${result.description}`);
