@@ -2,7 +2,7 @@ FROM node:20-bookworm-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip \
-  && python3 -m pip install --break-system-packages --no-cache-dir "yt-dlp[default,curl-cffi]" gallery-dl \
+  && python3 -m pip install --break-system-packages --no-cache-dir "yt-dlp[default,curl-cffi]" gallery-dl "instagrapi==2.18.14" \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

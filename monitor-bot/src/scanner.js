@@ -176,6 +176,37 @@ async function scanYtDlp(creator, config) {
   return normalizeItems(parsed.entries || [parsed], creator.platform);
 }
 
+async function scanInstagramSession(creator, config) {
+  if (creator.platform !== "Instagram" || !config.instagramSessionPath || !fs.existsSync(config.instagramSessionPath)) return [];
+  const username = new URL(creator.url).pathname.split("/").filter(Boolean)[0];
+  if (!username) throw new Error("לא ניתן לזהות את שם המשתמש ב-Instagram");
+  const raw = await new Promise((resolve, reject) => {
+    const child = spawn(config.pythonPath, [config.instagramBridgePath, "scan", "--session", config.instagramSessionPath, username], {
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("Instagram לא סיים את הסריקה בזמן"));
+    }, 90_000);
+    child.stdout.on("data", chunk => { stdout = (stdout + chunk).slice(-5_000_000); });
+    child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-2000); });
+    child.once("error", reject);
+    child.once("close", code => {
+      clearTimeout(timer);
+      if (code === 0 || stdout.trim()) resolve(stdout);
+      else reject(new Error(stderr.trim() || "Instagram scan failed"));
+    });
+    child.stdin.end(String(config.maxItems));
+  });
+  const result = JSON.parse(raw);
+  if (result.status === "SESSION_EXPIRED") throw new Error("AUTH_REQUIRED:Instagram");
+  if (result.status !== "OK") throw new Error(result.message || "Instagram scan failed");
+  return normalizeItems(result.items, "Instagram");
+}
+
 function collectObjects(value, output = []) {
   if (!value || typeof value !== "object") return output;
   if (value.id || value.post_id || value.tweet_id || value.shortcode || value.post_shortcode) {
@@ -310,6 +341,10 @@ export async function scanCreator(creator, config) {
     } catch {
       // Continue to yt-dlp, which also covers playlists and unusual channel URLs.
     }
+  }
+  if (creator.platform === "Instagram" && config.instagramSessionPath) {
+    const items = await scanInstagramSession(creator, config);
+    if (items.length) return items;
   }
   const needsSession = ["Instagram", "Facebook", "X"].includes(creator.platform);
   let firstError;

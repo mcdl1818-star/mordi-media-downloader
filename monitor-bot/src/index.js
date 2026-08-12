@@ -1,10 +1,19 @@
 import fs from "node:fs";
 import http from "node:http";
 import crypto from "node:crypto";
+import path from "node:path";
 import { readConfig } from "./config.js";
 import { Telegram } from "./telegram.js";
 import { Store } from "./store.js";
 import { validateCreatorUrl, scanCreator, downloadVideo, cleanupVideo } from "./scanner.js";
+import {
+  createInstagramConnectToken,
+  verifyInstagramConnectToken,
+  encryptInstagramSession,
+  decryptInstagramSession,
+  instagramConnectPage,
+  runInstagramLogin
+} from "./instagram-connect.js";
 
 const config = readConfig();
 const telegram = new Telegram(config.token);
@@ -13,6 +22,8 @@ await store.load();
 config.platformCookies = {};
 let offset = 0;
 let scanRunning = false;
+const usedInstagramTokens = new Set();
+const instagramConnectAttempts = new Map();
 
 const help = `שלח קישור לפרופיל או לערוץ כדי להתחיל לעקוב.
 
@@ -22,10 +33,12 @@ const help = `שלח קישור לפרופיל או לערוץ כדי להתחי
 /pause — השהיית כל המעקבים
 /resume — חידוש המעקבים
 /auth — מצב ההתחברות לפלטפורמות
+/instagram — חיבור Instagram פשוט מהטלפון
 
 בעת הוספה נשמר המצב הנוכחי, ולכן לא יישלח תוכן ישן.`;
 
 const AUTH_FILES = {
+  "instagram-session.enc": "Instagram",
   "instagram-cookies.txt": "Instagram",
   "facebook-cookies.txt": "Facebook",
   "tiktok-cookies.txt": "TikTok",
@@ -36,6 +49,16 @@ const AUTH_FILES = {
 async function hydrateAuth(platform) {
   const auth = store.state.auth?.[platform];
   if (!auth?.fileId) return false;
+  if (platform === "Instagram" && auth.kind === "instagrapi-v1") {
+    const encrypted = path.join(config.dataDir, "instagram-session.enc");
+    const destination = path.join(config.dataDir, "instagram-session.json");
+    await telegram.downloadFile(auth.fileId, encrypted);
+    const session = decryptInstagramSession(await fs.promises.readFile(encrypted), config.webhookSecret);
+    await fs.promises.writeFile(destination, JSON.stringify(session), { mode: 0o600 });
+    await fs.promises.rm(encrypted, { force: true });
+    config.instagramSessionPath = destination;
+    return true;
+  }
   const destination = `${config.dataDir}/${platform.toLowerCase()}-cookies.txt`;
   await telegram.downloadFile(auth.fileId, destination);
   config.platformCookies[platform] = destination;
@@ -47,8 +70,60 @@ for (const platform of Object.keys(store.state.auth || {})) {
 }
 
 function authRequiredMessage(platform) {
+  if (platform === "Instagram") {
+    return "🔐 כדי לעקוב באופן קבוע אחרי פוסטים, Reels וסטוריז, יש לחבר חשבון Instagram פעם אחת. לחץ על הכפתור למטה; הסיסמה אינה נשמרת.";
+  }
   const filename = platform === "X" ? "x-cookies.txt" : `${platform.toLowerCase()}-cookies.txt`;
   return `🔐 ${platform} דורש session כדי לקרוא פרופילים משרת ענן.\nשלח לבוט קובץ cookies בפורמט Netscape בשם ${filename}, ולאחר האישור שלח שוב את קישור הפרופיל. הקובץ נשמר באופן פרטי ב-Telegram ולא ב-GitHub.`;
+}
+
+function instagramConnectUrl() {
+  if (!config.webhookUrl || !config.webhookSecret) return "";
+  const token = createInstagramConnectToken(config.webhookSecret, config.allowedUserId);
+  return `${config.webhookUrl}/connect/instagram?token=${encodeURIComponent(token)}`;
+}
+
+function instagramConnectMarkup() {
+  const url = instagramConnectUrl();
+  return url ? { inline_keyboard: [[{ text: "📸 חבר Instagram", url }]] } : undefined;
+}
+
+async function sendInstagramConnect(chatId) {
+  const replyMarkup = instagramConnectMarkup();
+  if (!replyMarkup) return telegram.sendMessage(chatId, "חיבור Instagram זמין רק בשירות הענן.");
+  return telegram.sendMessage(chatId,
+    "📸 לחץ על הכפתור, התחבר פעם אחת ל-Instagram, והבוט ימשיך לעבוד בשרת גם כשהטלפון והמחשב כבויים. מומלץ להשתמש בחשבון משני.",
+    { reply_markup: replyMarkup }
+  );
+}
+
+async function saveInstagramSession(session, username) {
+  await fs.promises.mkdir(config.dataDir, { recursive: true });
+  const destination = path.join(config.dataDir, "instagram-session.json");
+  const encrypted = path.join(config.tempDir, `instagram-session-${crypto.randomUUID()}.enc`);
+  await fs.promises.mkdir(config.tempDir, { recursive: true });
+  await fs.promises.writeFile(destination, JSON.stringify(session), { mode: 0o600 });
+  await fs.promises.writeFile(encrypted, encryptInstagramSession(session, config.webhookSecret), { mode: 0o600 });
+  try {
+    const sent = await telegram.sendDocument(
+      config.allowedUserId,
+      encrypted,
+      "🔐 גיבוי מוצפן של חיבור Instagram — אין למחוק",
+      { filename: "instagram-session.enc", disableNotification: true }
+    );
+    store.state.auth ||= {};
+    store.state.auth.Instagram = {
+      fileId: sent.document.file_id,
+      filename: "instagram-session.enc",
+      kind: "instagrapi-v1",
+      username,
+      updatedAt: new Date().toISOString()
+    };
+    config.instagramSessionPath = destination;
+    await store.save();
+  } finally {
+    await fs.promises.rm(encrypted, { force: true });
+  }
 }
 
 async function deliver(item, subscription, { historical = false } = {}) {
@@ -98,7 +173,14 @@ async function scanAll({ report = false } = {}) {
         subscription.lastError = "";
       } catch (error) {
         errorCount += 1;
+        const previousError = subscription.lastError;
         subscription.lastError = String(error.message).slice(0, 300);
+        if (subscription.lastError === "AUTH_REQUIRED:Instagram" && previousError !== subscription.lastError) {
+          await telegram.sendMessage(config.allowedUserId,
+            "⚠️ חיבור Instagram פג תוקף. לחץ כדי להתחבר מחדש; רשימת המעקב נשמרה.",
+            { reply_markup: instagramConnectMarkup() }
+          ).catch(console.error);
+        }
         console.error(`Scan ${subscription.url}:`, error.message);
       }
       await store.save();
@@ -141,10 +223,12 @@ async function addSubscription(chatId, text) {
   } catch (error) {
     const errorText = String(error.message);
     if (errorText.startsWith("AUTH_REQUIRED:")) {
+      const platform = errorText.split(":")[1];
       await telegram.call("editMessageText", {
         chat_id: chatId,
         message_id: status.message_id,
-        text: authRequiredMessage(errorText.split(":")[1])
+        text: authRequiredMessage(platform),
+        ...(platform === "Instagram" ? { reply_markup: instagramConnectMarkup() } : {})
       });
       return;
     }
@@ -170,6 +254,7 @@ async function handleMessage(message) {
     store.state.auth[platform] = {
       fileId: message.document.file_id,
       filename,
+      kind: filename === "instagram-session.enc" ? "instagrapi-v1" : "cookies",
       updatedAt: new Date().toISOString()
     };
     await hydrateAuth(platform);
@@ -177,9 +262,10 @@ async function handleMessage(message) {
     return telegram.sendMessage(chatId, `✅ ההתחברות ל-${platform} נשמרה בענן. אפשר לשלוח עכשיו את קישור הפרופיל.`);
   }
   if (text === "/start" || text === "/help") return telegram.sendMessage(chatId, help);
+  if (text === "/instagram" || text === "/connect_instagram") return sendInstagramConnect(chatId);
   if (text === "/auth") {
     const lines = ["Instagram", "Facebook", "TikTok", "X"].map(platform =>
-      `${config.platformCookies[platform] ? "✅" : "⬜"} ${platform}`
+      `${(platform === "Instagram" ? (config.instagramSessionPath || config.platformCookies[platform]) : config.platformCookies[platform]) ? "✅" : "⬜"} ${platform}`
     );
     return telegram.sendMessage(chatId, `מצב התחברות:\n${lines.join("\n")}`);
   }
@@ -209,11 +295,115 @@ async function dispatchUpdate(update) {
   if (update.message) await handleMessage(update.message);
 }
 
+function configureBotCommands() {
+  return telegram.call("setMyCommands", {
+    commands: [
+      { command: "instagram", description: "חיבור Instagram מהטלפון" },
+      { command: "list", description: "רשימת המעקבים" },
+      { command: "check", description: "בדיקה מיידית" },
+      { command: "auth", description: "מצב החיבורים" },
+      { command: "pause", description: "השהיית המעקב" },
+      { command: "resume", description: "חידוש המעקב" }
+    ]
+  });
+}
+
+function sendConnectPage(response, page, status = 200) {
+  response.writeHead(status, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store, max-age=0",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+  });
+  response.end(page);
+}
+
+function readFormBody(request, limit = 20_000) {
+  return new Promise((resolve, reject) => {
+    let raw = "";
+    request.on("data", chunk => {
+      raw += chunk;
+      if (raw.length > limit) reject(new Error("הטופס גדול מדי"));
+    });
+    request.on("end", () => resolve(new URLSearchParams(raw)));
+    request.on("error", reject);
+  });
+}
+
+async function handleInstagramConnect(request, response, requestUrl) {
+  if (request.method === "GET") {
+    const token = requestUrl.searchParams.get("token") || "";
+    if (!verifyInstagramConnectToken(token, config.webhookSecret, config.allowedUserId) || usedInstagramTokens.has(token)) {
+      sendConnectPage(response, instagramConnectPage({ error: "הקישור פג תוקף. חזור לבוט ובקש קישור חדש עם /instagram." }), 403);
+      return;
+    }
+    sendConnectPage(response, instagramConnectPage({ token }));
+    return;
+  }
+  if (request.method !== "POST") {
+    response.writeHead(405, { allow: "GET, POST" });
+    response.end();
+    return;
+  }
+  const form = await readFormBody(request);
+  const token = form.get("token") || "";
+  if (!verifyInstagramConnectToken(token, config.webhookSecret, config.allowedUserId) || usedInstagramTokens.has(token)) {
+    sendConnectPage(response, instagramConnectPage({ error: "הקישור פג תוקף. חזור לבוט ובקש קישור חדש עם /instagram." }), 403);
+    return;
+  }
+  const attempts = instagramConnectAttempts.get(token) || 0;
+  if (attempts >= 5) {
+    sendConnectPage(response, instagramConnectPage({ error: "בוצעו יותר מדי ניסיונות. חזור לבוט ובקש קישור חדש עם /instagram." }), 429);
+    return;
+  }
+  instagramConnectAttempts.set(token, attempts + 1);
+  const username = (form.get("username") || "").trim().replace(/^@/, "");
+  const password = form.get("password") || "";
+  const code = (form.get("code") || "").trim();
+  if (!/^[A-Za-z0-9._]{1,30}$/.test(username) || password.length < 6 || password.length > 200) {
+    sendConnectPage(response, instagramConnectPage({ token, error: "בדוק את שם המשתמש והסיסמה ונסה שוב." }), 400);
+    return;
+  }
+  const result = await runInstagramLogin(config, { username, password, code });
+  if (result.status === "TWO_FACTOR") {
+    sendConnectPage(response, instagramConnectPage({ token, needsCode: true, error: "נדרש קוד אימות. הזן שוב את הסיסמה ואת הקוד העדכני." }));
+    return;
+  }
+  if (result.status === "CHALLENGE") {
+    sendConnectPage(response, instagramConnectPage({ token, error: "Instagram מבקשת אישור כניסה. אשר את הכניסה באפליקציה הרשמית ואז שלח את הטופס שוב." }));
+    return;
+  }
+  if (result.status === "BAD_CREDENTIALS") {
+    sendConnectPage(response, instagramConnectPage({ token, error: "שם המשתמש או הסיסמה לא התקבלו. בדוק ונסה שוב." }), 401);
+    return;
+  }
+  if (result.status !== "OK" || !result.session) {
+    sendConnectPage(response, instagramConnectPage({ token, error: "Instagram דחתה את ההתחברות כרגע. המתן כמה דקות ונסה שוב." }), 502);
+    return;
+  }
+  await saveInstagramSession(result.session, result.username || username);
+  usedInstagramTokens.add(token);
+  instagramConnectAttempts.delete(token);
+  await telegram.sendMessage(config.allowedUserId, "✅ Instagram חובר בהצלחה. אפשר לשלוח עכשיו קישור לפרופיל למעקב.").catch(console.error);
+  sendConnectPage(response, instagramConnectPage({ success: true }));
+}
+
 async function startWebhook() {
   if (!config.webhookSecret) throw new Error("חסר WEBHOOK_SECRET במצב ענן");
   const safeSecret = crypto.createHash("sha256").update(config.webhookSecret).digest("hex");
   const webhookPath = `/telegram/${safeSecret}`;
   const server = http.createServer((request, response) => {
+    const requestUrl = new URL(request.url, config.webhookUrl);
+    if (requestUrl.pathname === "/connect/instagram") {
+      void handleInstagramConnect(request, response, requestUrl).catch(error => {
+        console.error("Instagram connect:", error.message);
+        if (!response.headersSent) sendConnectPage(response, instagramConnectPage({ error: "החיבור נכשל זמנית. חזור לבוט ונסה שוב." }), 500);
+        else response.end();
+      });
+      return;
+    }
     if (request.method === "GET" && request.url === "/") {
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       response.end(JSON.stringify({ ok: true, service: "Mordi Creator Monitor" }));
@@ -255,11 +445,13 @@ async function startWebhook() {
     allowed_updates: ["message"],
     drop_pending_updates: false
   });
+  await configureBotCommands();
   console.log(`Creator monitor webhook active on port ${config.port}`);
 }
 
 async function poll() {
   await telegram.call("deleteWebhook", { drop_pending_updates: false });
+  await configureBotCommands();
   setInterval(() => void scanAll().catch(console.error), config.intervalMs).unref();
   void scanAll().catch(console.error);
   console.log(`Creator monitor polling active; interval ${config.intervalMs / 60_000} minutes`);
