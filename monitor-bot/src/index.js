@@ -9,6 +9,7 @@ import { validateCreatorUrl, scanCreator, downloadVideo, cleanupVideo } from "./
 import {
   createInstagramConnectToken,
   verifyInstagramConnectToken,
+  instagramUsernameFromConnectToken,
   normalizeInstagramUsername,
   encryptInstagramSession,
   decryptInstagramSession,
@@ -78,22 +79,24 @@ function authRequiredMessage(platform) {
   return `🔐 ${platform} דורש session כדי לקרוא פרופילים משרת ענן.\nשלח לבוט קובץ cookies בפורמט Netscape בשם ${filename}, ולאחר האישור שלח שוב את קישור הפרופיל. הקובץ נשמר באופן פרטי ב-Telegram ולא ב-GitHub.`;
 }
 
-function instagramConnectUrl() {
+function instagramConnectUrl(username = "") {
   if (!config.webhookUrl || !config.webhookSecret) return "";
-  const token = createInstagramConnectToken(config.webhookSecret, config.allowedUserId);
+  const token = createInstagramConnectToken(config.webhookSecret, config.allowedUserId, Date.now(), 20 * 60_000, username);
   return `${config.webhookUrl}/connect/instagram?token=${encodeURIComponent(token)}`;
 }
 
-function instagramConnectMarkup() {
-  const url = instagramConnectUrl();
+function instagramConnectMarkup(username = "") {
+  const url = instagramConnectUrl(username);
   return url ? { inline_keyboard: [[{ text: "📸 חבר Instagram", url }]] } : undefined;
 }
 
-async function sendInstagramConnect(chatId) {
-  const replyMarkup = instagramConnectMarkup();
+async function sendInstagramConnect(chatId, username = "") {
+  const normalizedUsername = normalizeInstagramUsername(username);
+  const replyMarkup = instagramConnectMarkup(normalizedUsername);
   if (!replyMarkup) return telegram.sendMessage(chatId, "חיבור Instagram זמין רק בשירות הענן.");
+  const account = /^[A-Za-z0-9._]{1,30}$/.test(normalizedUsername) ? `\nהחשבון שנקבע: @${normalizedUsername}` : "";
   return telegram.sendMessage(chatId,
-    "📸 לחץ על הכפתור, התחבר פעם אחת ל-Instagram, והבוט ימשיך לעבוד בשרת גם כשהטלפון והמחשב כבויים. מומלץ להשתמש בחשבון משני.",
+    `📸 לחץ על הכפתור, התחבר פעם אחת ל-Instagram, והבוט ימשיך לעבוד בשרת גם כשהטלפון והמחשב כבויים.${account}`,
     { reply_markup: replyMarkup }
   );
 }
@@ -263,7 +266,8 @@ async function handleMessage(message) {
     return telegram.sendMessage(chatId, `✅ ההתחברות ל-${platform} נשמרה בענן. אפשר לשלוח עכשיו את קישור הפרופיל.`);
   }
   if (text === "/start" || text === "/help") return telegram.sendMessage(chatId, help);
-  if (text === "/instagram" || text === "/connect_instagram") return sendInstagramConnect(chatId);
+  const instagramCommand = text.match(/^\/(?:instagram|connect_instagram)(?:@\w+)?(?:\s+(.+))?$/i);
+  if (instagramCommand) return sendInstagramConnect(chatId, instagramCommand[1] || "");
   if (text === "/auth") {
     const lines = ["Instagram", "Facebook", "TikTok", "X"].map(platform =>
       `${(platform === "Instagram" ? (config.instagramSessionPath || config.platformCookies[platform]) : config.platformCookies[platform]) ? "✅" : "⬜"} ${platform}`
@@ -340,7 +344,8 @@ async function handleInstagramConnect(request, response, requestUrl) {
       sendConnectPage(response, instagramConnectPage({ error: "הקישור פג תוקף. חזור לבוט ובקש קישור חדש עם /instagram." }), 403);
       return;
     }
-    sendConnectPage(response, instagramConnectPage({ token }));
+    const username = instagramUsernameFromConnectToken(token, config.webhookSecret, config.allowedUserId);
+    sendConnectPage(response, instagramConnectPage({ token, username }));
     return;
   }
   if (request.method !== "POST") {
@@ -360,32 +365,33 @@ async function handleInstagramConnect(request, response, requestUrl) {
     return;
   }
   instagramConnectAttempts.set(token, attempts + 1);
-  const username = normalizeInstagramUsername(form.get("username"));
+  const lockedUsername = instagramUsernameFromConnectToken(token, config.webhookSecret, config.allowedUserId);
+  const username = lockedUsername || normalizeInstagramUsername(form.get("username"));
   const password = form.get("password") || "";
   const code = (form.get("code") || "").trim();
   if (!/^[A-Za-z0-9._]{1,30}$/.test(username)) {
-    sendConnectPage(response, instagramConnectPage({ token, error: "הזן את שם המשתמש שמופיע בפרופיל Instagram — לא אימייל או מספר טלפון. אפשר גם להדביק קישור מלא לפרופיל." }), 400);
+    sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, error: "הזן את שם המשתמש שמופיע בפרופיל Instagram — לא אימייל או מספר טלפון. אפשר גם להדביק קישור מלא לפרופיל." }), 400);
     return;
   }
   if (password.length < 6 || password.length > 200) {
-    sendConnectPage(response, instagramConnectPage({ token, error: "שדה הסיסמה לא נקלט במלואו. הקלד שוב את סיסמת Instagram ולחץ על חיבור." }), 400);
+    sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, error: "שדה הסיסמה לא נקלט במלואו. הקלד שוב את סיסמת Instagram ולחץ על חיבור." }), 400);
     return;
   }
   const result = await runInstagramLogin(config, { username, password, code });
   if (result.status === "TWO_FACTOR") {
-    sendConnectPage(response, instagramConnectPage({ token, needsCode: true, error: "נדרש קוד אימות. הזן שוב את הסיסמה ואת הקוד העדכני." }));
+    sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, needsCode: true, error: "נדרש קוד אימות. הזן שוב את הסיסמה ואת הקוד העדכני." }));
     return;
   }
   if (result.status === "CHALLENGE") {
-    sendConnectPage(response, instagramConnectPage({ token, error: "Instagram מבקשת אישור כניסה. אשר את הכניסה באפליקציה הרשמית ואז שלח את הטופס שוב." }));
+    sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, error: "Instagram מבקשת אישור כניסה. אשר את הכניסה באפליקציה הרשמית ואז שלח את הטופס שוב." }));
     return;
   }
   if (result.status === "BAD_CREDENTIALS") {
-    sendConnectPage(response, instagramConnectPage({ token, error: "שם המשתמש או הסיסמה לא התקבלו. בדוק ונסה שוב." }), 401);
+    sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, error: "שם המשתמש או הסיסמה לא התקבלו. בדוק ונסה שוב." }), 401);
     return;
   }
   if (result.status !== "OK" || !result.session) {
-    sendConnectPage(response, instagramConnectPage({ token, error: "Instagram דחתה את ההתחברות כרגע. המתן כמה דקות ונסה שוב." }), 502);
+    sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, error: "Instagram דחתה את ההתחברות כרגע. המתן כמה דקות ונסה שוב." }), 502);
     return;
   }
   await saveInstagramSession(result.session, result.username || username);
