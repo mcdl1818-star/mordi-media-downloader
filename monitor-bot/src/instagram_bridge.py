@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import json
+import hashlib
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
 
 def output(value, code=0):
@@ -24,6 +26,17 @@ def iso_time(value):
 
 def login():
     from instagrapi import Client
+    client = None
+
+    def result(status, **extra):
+        value = {"status": status, **extra}
+        if client is not None and status != "OK":
+            try:
+                value["settings"] = client.get_settings()
+            except Exception:
+                pass
+        output(value)
+
     try:
         payload = json.load(sys.stdin)
         username = str(payload.get("username", "")).strip()
@@ -31,30 +44,49 @@ def login():
         code = str(payload.get("code", "")).strip()
         if not username or not password:
             output({"status": "ERROR", "message": "חסרים שם משתמש או סיסמה"}, 2)
-        client = Client()
+        saved_settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else None
+        client = Client(settings=saved_settings or {})
+        if not saved_settings:
+            seed = str(payload.get("deviceSeed", "")).strip()
+            if len(seed) < 32:
+                output({"status": "ERROR", "message": "Missing stable device seed"}, 2)
+            stable = lambda label: str(uuid5(NAMESPACE_URL, f"mordi-instagram:{seed}:{label}"))
+            client.set_uuids({
+                "phone_id": stable("phone_id"),
+                "uuid": stable("uuid"),
+                "client_session_id": stable("client_session_id"),
+                "advertising_id": stable("advertising_id"),
+                "android_device_id": "android-" + hashlib.sha256(f"{seed}:android".encode()).hexdigest()[:16],
+                "request_id": stable("request_id"),
+                "tray_session_id": stable("tray_session_id"),
+            })
+            client.set_country("IL")
+            client.set_country_code(972)
+            client.set_locale("he_IL")
+            client.set_timezone_offset(10800, "Asia/Jerusalem")
         client.delay_range = [1, 3]
         logged_in = client.login(username, password, verification_code=code)
         settings = client.get_settings()
         session_id = str(settings.get("authorization_data", {}).get("sessionid", ""))
         if not logged_in or not session_id:
-            output({"status": "LOGIN_REJECTED"})
+            result("LOGIN_REJECTED")
         output({"status": "OK", "username": username, "session": settings})
     except Exception as error:
         name = type(error).__name__
         if name in ("TwoFactorRequired", "TwoFactorAuthRequired"):
-            output({"status": "TWO_FACTOR"})
+            result("TWO_FACTOR", reason=name)
         message = str(error).lower()
         if name in ("ChallengeRequired", "ChallengeUnknownStep", "ClientNotFoundError") or "checkpoint_required" in message:
-            output({"status": "CHALLENGE"})
+            result("CHALLENGE", reason=name)
         if name in ("BadCredentials", "BadPassword", "InvalidUser"):
-            output({"status": "BAD_CREDENTIALS"})
+            result("BAD_CREDENTIALS", reason=name)
         if name in ("PleaseWaitFewMinutes", "ClientThrottledError", "RateLimitError"):
-            output({"status": "RATE_LIMIT"})
+            result("RATE_LIMIT", reason=name)
         if name in ("SentryBlock", "FeedbackRequired", "LoginRequired", "ClientLoginRequired", "ReloginAttemptExceeded", "ProxyAddressIsBlocked"):
-            output({"status": "LOGIN_BLOCKED"})
+            result("LOGIN_BLOCKED", reason=name)
         if name in ("ClientConnectionError", "ClientJSONDecodeError", "ClientProxyConnectionError", "ConnectTimeout", "ReadTimeout"):
-            output({"status": "NETWORK_ERROR"})
-        output({"status": "LOGIN_REJECTED"})
+            result("NETWORK_ERROR", reason=name)
+        result("LOGIN_REJECTED", reason=name)
 
 
 def media_parts(media, username, kind):

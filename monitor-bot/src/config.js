@@ -32,6 +32,8 @@ export function readConfig() {
     pythonPath: process.env.PYTHON_PATH?.trim() || "python3",
     instagramBridgePath: path.resolve("src", "instagram_bridge.py"),
     instagramSessionPath: "",
+    instagramBootstrapPath: "",
+    instagramLoginUsername: process.env.INSTAGRAM_LOGIN_USERNAME?.trim().replace(/^@/, "") || "vogelnati",
     ffmpegPath: process.env.FFMPEG_PATH?.trim() || "ffmpeg",
     sendMode: process.env.SEND_MODE?.trim().toLowerCase() === "link" ? "link" : "video",
     maxBytes: (Number(process.env.MAX_FILE_SIZE_MB) || 49) * 1024 * 1024,

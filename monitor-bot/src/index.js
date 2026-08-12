@@ -51,6 +51,16 @@ const AUTH_FILES = {
 async function hydrateAuth(platform) {
   const auth = store.state.auth?.[platform];
   if (!auth?.fileId) return false;
+  if (platform === "InstagramBootstrap" && auth.kind === "instagrapi-bootstrap-v1") {
+    const encrypted = path.join(config.dataDir, "instagram-bootstrap.enc");
+    const destination = path.join(config.dataDir, "instagram-bootstrap.json");
+    await telegram.downloadFile(auth.fileId, encrypted);
+    const settings = decryptInstagramSession(await fs.promises.readFile(encrypted), config.webhookSecret);
+    await fs.promises.writeFile(destination, JSON.stringify(settings), { mode: 0o600 });
+    await fs.promises.rm(encrypted, { force: true });
+    config.instagramBootstrapPath = destination;
+    return true;
+  }
   if (platform === "Instagram" && auth.kind === "instagrapi-v1") {
     const encrypted = path.join(config.dataDir, "instagram-session.enc");
     const destination = path.join(config.dataDir, "instagram-session.json");
@@ -91,7 +101,7 @@ function instagramConnectMarkup(username = "") {
 }
 
 async function sendInstagramConnect(chatId, username = "") {
-  const normalizedUsername = normalizeInstagramUsername(username);
+  const normalizedUsername = normalizeInstagramUsername(username || config.instagramLoginUsername);
   const replyMarkup = instagramConnectMarkup(normalizedUsername);
   if (!replyMarkup) return telegram.sendMessage(chatId, "חיבור Instagram זמין רק בשירות הענן.");
   const account = /^[A-Za-z0-9._]{1,30}$/.test(normalizedUsername) ? `\nהחשבון שנקבע: @${normalizedUsername}` : "";
@@ -99,6 +109,57 @@ async function sendInstagramConnect(chatId, username = "") {
     `📸 לחץ על הכפתור, התחבר פעם אחת ל-Instagram, והבוט ימשיך לעבוד בשרת גם כשהטלפון והמחשב כבויים.${account}`,
     { reply_markup: replyMarkup }
   );
+}
+
+function instagramDeviceSeed(username) {
+  return crypto.createHmac("sha256", config.webhookSecret)
+    .update(`instagram-device:${String(username).toLowerCase()}`)
+    .digest("hex");
+}
+
+async function loadInstagramBootstrap(username) {
+  const auth = store.state.auth?.InstagramBootstrap;
+  if (!config.instagramBootstrapPath || auth?.username !== username) return undefined;
+  try {
+    return JSON.parse(await fs.promises.readFile(config.instagramBootstrapPath, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+async function saveInstagramBootstrap(settings, username) {
+  if (!settings || typeof settings !== "object") return;
+  await fs.promises.mkdir(config.dataDir, { recursive: true });
+  await fs.promises.mkdir(config.tempDir, { recursive: true });
+  const destination = path.join(config.dataDir, "instagram-bootstrap.json");
+  const encrypted = path.join(config.tempDir, `instagram-bootstrap-${crypto.randomUUID()}.enc`);
+  await fs.promises.writeFile(destination, JSON.stringify(settings), { mode: 0o600 });
+  await fs.promises.writeFile(encrypted, encryptInstagramSession(settings, config.webhookSecret), { mode: 0o600 });
+  try {
+    const sent = await telegram.sendDocument(
+      config.allowedUserId,
+      encrypted,
+      "🔐 מצב מוצפן להמשך חיבור Instagram — אין למחוק",
+      { filename: "instagram-bootstrap.enc", disableNotification: true }
+    );
+    const previousMessageId = store.state.auth?.InstagramBootstrap?.messageId;
+    store.state.auth ||= {};
+    store.state.auth.InstagramBootstrap = {
+      fileId: sent.document.file_id,
+      messageId: sent.message_id,
+      filename: "instagram-bootstrap.enc",
+      kind: "instagrapi-bootstrap-v1",
+      username,
+      updatedAt: new Date().toISOString()
+    };
+    config.instagramBootstrapPath = destination;
+    await store.save();
+    if (previousMessageId && previousMessageId !== sent.message_id) {
+      await telegram.call("deleteMessage", { chat_id: config.allowedUserId, message_id: previousMessageId }).catch(() => {});
+    }
+  } finally {
+    await fs.promises.rm(encrypted, { force: true });
+  }
 }
 
 async function saveInstagramSession(session, username) {
@@ -123,8 +184,15 @@ async function saveInstagramSession(session, username) {
       username,
       updatedAt: new Date().toISOString()
     };
+    const bootstrapMessageId = store.state.auth.InstagramBootstrap?.messageId;
+    delete store.state.auth.InstagramBootstrap;
     config.instagramSessionPath = destination;
+    config.instagramBootstrapPath = "";
+    await fs.promises.rm(path.join(config.dataDir, "instagram-bootstrap.json"), { force: true });
     await store.save();
+    if (bootstrapMessageId) {
+      await telegram.call("deleteMessage", { chat_id: config.allowedUserId, message_id: bootstrapMessageId }).catch(() => {});
+    }
   } finally {
     await fs.promises.rm(encrypted, { force: true });
   }
@@ -379,11 +447,23 @@ async function handleInstagramConnect(request, response, requestUrl) {
   }
   let result;
   try {
-    result = await runInstagramLogin(config, { username, password, code });
+    result = await runInstagramLogin(config, {
+      username,
+      password,
+      code,
+      deviceSeed: instagramDeviceSeed(username),
+      settings: await loadInstagramBootstrap(username)
+    });
   } catch (error) {
     console.error("Instagram login bridge:", error.message);
     sendConnectPage(response, instagramConnectPage({ token, username, error: "תהליך החיבור בשרת לא הושלם. החשבון נשמר בטופס; המתן דקה ונסה שוב עם אותה סיסמה." }), 502);
     return;
+  }
+  if (result.status !== "OK" && result.settings) {
+    await saveInstagramBootstrap(result.settings, username).catch(error => console.error("Instagram bootstrap save:", error.message));
+  }
+  if (result.status !== "OK") {
+    console.warn("Instagram login result:", result.status, result.reason || "unspecified");
   }
   if (result.status === "TWO_FACTOR") {
     sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, needsCode: true, error: "נדרש קוד אימות. הזן שוב את הסיסמה ואת הקוד העדכני." }));
@@ -410,7 +490,8 @@ async function handleInstagramConnect(request, response, requestUrl) {
     return;
   }
   if (result.status !== "OK" || !result.session) {
-    sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, error: "Instagram דחתה את ההתחברות כרגע. המתן כמה דקות ונסה שוב." }), 502);
+    const reason = String(result.reason || "unknown").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
+    sendConnectPage(response, instagramConnectPage({ token, username, error: `Instagram דחתה את ההתחברות. מצב המכשיר נשמר ולא יתחיל מחדש. קוד אבחון: ${reason}` }), 502);
     return;
   }
   await saveInstagramSession(result.session, result.username || username);
