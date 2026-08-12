@@ -127,7 +127,7 @@ async function loadInstagramBootstrap(username) {
   }
 }
 
-async function saveInstagramBootstrap(settings, username) {
+async function saveInstagramBootstrap(settings, username, status = "LOGIN_REJECTED", reason = "unknown") {
   if (!settings || typeof settings !== "object") return;
   await fs.promises.mkdir(config.dataDir, { recursive: true });
   await fs.promises.mkdir(config.tempDir, { recursive: true });
@@ -150,6 +150,8 @@ async function saveInstagramBootstrap(settings, username) {
       filename: "instagram-bootstrap.enc",
       kind: "instagrapi-bootstrap-v1",
       username,
+      status: String(status).replace(/[^A-Z0-9_]/g, "").slice(0, 40),
+      reason: String(reason).replace(/[^A-Za-z0-9_-]/g, "").slice(0, 60),
       updatedAt: new Date().toISOString()
     };
     config.instagramBootstrapPath = destination;
@@ -269,6 +271,17 @@ async function addSubscription(chatId, text) {
     await telegram.sendMessage(chatId, "הכתובת כבר נמצאת במעקב.");
     return;
   }
+  if (creator.platform === "Instagram" && !config.instagramSessionPath) {
+    const pending = store.state.auth?.InstagramBootstrap;
+    const detail = pending
+      ? `\nמצב החיבור נשמר עבור @${pending.username || config.instagramLoginUsername}; הוא עדיין ממתין לאישור Instagram.`
+      : "";
+    await telegram.sendMessage(chatId,
+      `⏳ אין עדיין חיבור Instagram מלא, ולכן לא התחלתי בדיקה איטית של הפרופיל.${detail}\nלחץ על הכפתור, השלם את החיבור ורק אז שלח שוב את קישור הפרופיל.`,
+      { reply_markup: instagramConnectMarkup(pending?.username || config.instagramLoginUsername) }
+    );
+    return;
+  }
   const status = await telegram.sendMessage(chatId, "🔎 בודק את הכתובת ושומר נקודת התחלה...");
   try {
     const items = await scanCreator(creator, config);
@@ -340,6 +353,10 @@ async function handleMessage(message) {
     const lines = ["Instagram", "Facebook", "TikTok", "X"].map(platform =>
       `${(platform === "Instagram" ? (config.instagramSessionPath || config.platformCookies[platform]) : config.platformCookies[platform]) ? "✅" : "⬜"} ${platform}`
     );
+    const pending = store.state.auth?.InstagramBootstrap;
+    if (pending && !config.instagramSessionPath) {
+      lines[0] = `⏳ Instagram — החיבור החלקי נשמר עבור @${pending.username || config.instagramLoginUsername}; סיבה: ${pending.reason || pending.status || "ממתין לאישור"}`;
+    }
     return telegram.sendMessage(chatId, `מצב התחברות:\n${lines.join("\n")}`);
   }
   if (text === "/list") {
@@ -460,7 +477,7 @@ async function handleInstagramConnect(request, response, requestUrl) {
     return;
   }
   if (result.status !== "OK" && result.settings) {
-    await saveInstagramBootstrap(result.settings, username).catch(error => console.error("Instagram bootstrap save:", error.message));
+    await saveInstagramBootstrap(result.settings, username, result.status, result.reason).catch(error => console.error("Instagram bootstrap save:", error.message));
   }
   if (result.status !== "OK") {
     console.warn("Instagram login result:", result.status, result.reason || "unspecified");
@@ -470,7 +487,7 @@ async function handleInstagramConnect(request, response, requestUrl) {
     return;
   }
   if (result.status === "CHALLENGE") {
-    sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, error: "Instagram מבקשת אישור כניסה. אשר את הכניסה באפליקציה הרשמית ואז שלח את הטופס שוב." }));
+    sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, needsCode: true, error: "Instagram מבקשת אימות. פתח את האפליקציה ואשר שזה אתה. אם נשלח קוד ב-SMS או באימייל, הזן אותו כאן יחד עם הסיסמה." }));
     return;
   }
   if (result.status === "BAD_CREDENTIALS") {

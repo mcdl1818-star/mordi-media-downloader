@@ -65,6 +65,8 @@ def login():
             client.set_locale("he_IL")
             client.set_timezone_offset(10800, "Asia/Jerusalem")
         client.delay_range = [1, 3]
+        if code:
+            client.challenge_code_handler = lambda _username, _choice: code
         logged_in = client.login(username, password, verification_code=code)
         settings = client.get_settings()
         session_id = str(settings.get("authorization_data", {}).get("sessionid", ""))
@@ -73,16 +75,24 @@ def login():
         output({"status": "OK", "username": username, "session": settings})
     except Exception as error:
         name = type(error).__name__
-        if name in ("TwoFactorRequired", "TwoFactorAuthRequired"):
+        last_json = client.last_json if client is not None and isinstance(getattr(client, "last_json", None), dict) else {}
+        signals = " ".join(str(value) for value in (
+            error,
+            last_json.get("message", ""),
+            last_json.get("error_type", ""),
+            last_json.get("feedback_title", ""),
+            last_json.get("feedback_message", ""),
+            last_json.get("checkpoint_url", ""),
+        )).lower()
+        if name in ("TwoFactorRequired", "TwoFactorAuthRequired") or "two_factor" in signals:
             result("TWO_FACTOR", reason=name)
-        message = str(error).lower()
-        if name in ("ChallengeRequired", "ChallengeUnknownStep", "ClientNotFoundError") or "checkpoint_required" in message:
+        if name in ("ChallengeRequired", "ChallengeUnknownStep", "ClientNotFoundError") or any(value in signals for value in ("challenge_required", "checkpoint_required", "verification_required")):
             result("CHALLENGE", reason=name)
-        if name in ("BadCredentials", "BadPassword", "InvalidUser"):
+        if name in ("BadCredentials", "BadPassword", "InvalidUser") or any(value in signals for value in ("bad_password", "invalid_user", "invalid_credentials")):
             result("BAD_CREDENTIALS", reason=name)
-        if name in ("PleaseWaitFewMinutes", "ClientThrottledError", "RateLimitError"):
+        if name in ("PleaseWaitFewMinutes", "ClientThrottledError", "RateLimitError") or any(value in signals for value in ("please wait", "rate_limit", "too many requests")):
             result("RATE_LIMIT", reason=name)
-        if name in ("SentryBlock", "FeedbackRequired", "LoginRequired", "ClientLoginRequired", "ReloginAttemptExceeded", "ProxyAddressIsBlocked"):
+        if name in ("SentryBlock", "FeedbackRequired", "LoginRequired", "ClientLoginRequired", "ReloginAttemptExceeded", "ProxyAddressIsBlocked") or any(value in signals for value in ("sentry_block", "feedback_required", "login_required", "proxy_address_is_blocked")):
             result("LOGIN_BLOCKED", reason=name)
         if name in ("ClientConnectionError", "ClientJSONDecodeError", "ClientProxyConnectionError", "ConnectTimeout", "ReadTimeout"):
             result("NETWORK_ERROR", reason=name)
