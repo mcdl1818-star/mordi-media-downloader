@@ -111,10 +111,10 @@ export function runInstagramLogin(config, credentials) {
       clearTimeout(timer);
       try {
         const result = JSON.parse(stdout);
-        if (code === 0 && result.status) resolve(result);
+        if (result.status) resolve(result);
         else reject(new Error(result.message || "ההתחברות ל-Instagram נכשלה"));
       } catch {
-        reject(new Error("ההתחברות ל-Instagram נכשלה"));
+        reject(new Error(`ההתחברות ל-Instagram נכשלה (bridge ${code ?? "unknown"})`));
       }
     });
     child.stdin.end(JSON.stringify(credentials));

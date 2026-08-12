@@ -33,18 +33,28 @@ def login():
             output({"status": "ERROR", "message": "חסרים שם משתמש או סיסמה"}, 2)
         client = Client()
         client.delay_range = [1, 3]
-        client.login(username, password, verification_code=code)
-        client.account_info()
-        output({"status": "OK", "username": username, "session": client.get_settings()})
+        logged_in = client.login(username, password, verification_code=code)
+        settings = client.get_settings()
+        session_id = str(settings.get("authorization_data", {}).get("sessionid", ""))
+        if not logged_in or not session_id:
+            output({"status": "LOGIN_REJECTED"})
+        output({"status": "OK", "username": username, "session": settings})
     except Exception as error:
         name = type(error).__name__
         if name in ("TwoFactorRequired", "TwoFactorAuthRequired"):
             output({"status": "TWO_FACTOR"})
-        if name in ("ChallengeRequired", "ChallengeUnknownStep"):
+        message = str(error).lower()
+        if name in ("ChallengeRequired", "ChallengeUnknownStep", "ClientNotFoundError") or "checkpoint_required" in message:
             output({"status": "CHALLENGE"})
-        if name in ("BadPassword", "InvalidUser"):
+        if name in ("BadCredentials", "BadPassword", "InvalidUser"):
             output({"status": "BAD_CREDENTIALS"})
-        output({"status": "ERROR", "message": "Instagram דחתה את ההתחברות. נסה שוב או אשר את הכניסה באפליקציה."}, 2)
+        if name in ("PleaseWaitFewMinutes", "ClientThrottledError", "RateLimitError"):
+            output({"status": "RATE_LIMIT"})
+        if name in ("SentryBlock", "FeedbackRequired", "LoginRequired", "ClientLoginRequired", "ReloginAttemptExceeded", "ProxyAddressIsBlocked"):
+            output({"status": "LOGIN_BLOCKED"})
+        if name in ("ClientConnectionError", "ClientJSONDecodeError", "ClientProxyConnectionError", "ConnectTimeout", "ReadTimeout"):
+            output({"status": "NETWORK_ERROR"})
+        output({"status": "LOGIN_REJECTED"})
 
 
 def media_parts(media, username, kind):

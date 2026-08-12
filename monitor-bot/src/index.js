@@ -377,7 +377,14 @@ async function handleInstagramConnect(request, response, requestUrl) {
     sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, error: "שדה הסיסמה לא נקלט במלואו. הקלד שוב את סיסמת Instagram ולחץ על חיבור." }), 400);
     return;
   }
-  const result = await runInstagramLogin(config, { username, password, code });
+  let result;
+  try {
+    result = await runInstagramLogin(config, { username, password, code });
+  } catch (error) {
+    console.error("Instagram login bridge:", error.message);
+    sendConnectPage(response, instagramConnectPage({ token, username, error: "תהליך החיבור בשרת לא הושלם. החשבון נשמר בטופס; המתן דקה ונסה שוב עם אותה סיסמה." }), 502);
+    return;
+  }
   if (result.status === "TWO_FACTOR") {
     sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, needsCode: true, error: "נדרש קוד אימות. הזן שוב את הסיסמה ואת הקוד העדכני." }));
     return;
@@ -388,6 +395,18 @@ async function handleInstagramConnect(request, response, requestUrl) {
   }
   if (result.status === "BAD_CREDENTIALS") {
     sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, error: "שם המשתמש או הסיסמה לא התקבלו. בדוק ונסה שוב." }), 401);
+    return;
+  }
+  if (result.status === "RATE_LIMIT") {
+    sendConnectPage(response, instagramConnectPage({ token, username, error: "Instagram הגבילה זמנית ניסיונות כניסה. אל תנסה שוב עכשיו; המתן 15 דקות ובקש מהבוט קישור חדש." }), 429);
+    return;
+  }
+  if (result.status === "LOGIN_BLOCKED") {
+    sendConnectPage(response, instagramConnectPage({ token, username, error: "Instagram חסמה את הכניסה החדשה. פתח עכשיו את אפליקציית Instagram, אשר שזה אתה, ואז חזור ושלח את הטופס שוב." }), 403);
+    return;
+  }
+  if (result.status === "NETWORK_ERROR") {
+    sendConnectPage(response, instagramConnectPage({ token, username, error: "Instagram לא השיבה לשרת. החשבון נשמר; המתן דקה ונסה שוב." }), 503);
     return;
   }
   if (result.status !== "OK" || !result.session) {
