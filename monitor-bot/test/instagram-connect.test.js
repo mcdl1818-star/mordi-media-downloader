@@ -3,10 +3,18 @@ import assert from "node:assert/strict";
 import {
   createInstagramConnectToken,
   verifyInstagramConnectToken,
+  normalizeInstagramUsername,
   encryptInstagramSession,
   decryptInstagramSession,
   instagramConnectPage
 } from "../src/instagram-connect.js";
+
+test("Instagram username accepts a handle or profile URL", () => {
+  assert.equal(normalizeInstagramUsername(" @Example.User "), "Example.User");
+  assert.equal(normalizeInstagramUsername("https://www.instagram.com/example_user/?hl=he"), "example_user");
+  assert.equal(normalizeInstagramUsername("instagram.com/example_user/"), "example_user");
+  assert.equal(normalizeInstagramUsername("person@example.com"), "person@example.com");
+});
 
 test("creates a short-lived Instagram connection token for one Telegram user", () => {
   const token = createInstagramConnectToken("secret", "123", 1_000, 5_000);

@@ -9,6 +9,7 @@ import { validateCreatorUrl, scanCreator, downloadVideo, cleanupVideo } from "./
 import {
   createInstagramConnectToken,
   verifyInstagramConnectToken,
+  normalizeInstagramUsername,
   encryptInstagramSession,
   decryptInstagramSession,
   instagramConnectPage,
@@ -359,11 +360,15 @@ async function handleInstagramConnect(request, response, requestUrl) {
     return;
   }
   instagramConnectAttempts.set(token, attempts + 1);
-  const username = (form.get("username") || "").trim().replace(/^@/, "");
+  const username = normalizeInstagramUsername(form.get("username"));
   const password = form.get("password") || "";
   const code = (form.get("code") || "").trim();
-  if (!/^[A-Za-z0-9._]{1,30}$/.test(username) || password.length < 6 || password.length > 200) {
-    sendConnectPage(response, instagramConnectPage({ token, error: "בדוק את שם המשתמש והסיסמה ונסה שוב." }), 400);
+  if (!/^[A-Za-z0-9._]{1,30}$/.test(username)) {
+    sendConnectPage(response, instagramConnectPage({ token, error: "הזן את שם המשתמש שמופיע בפרופיל Instagram — לא אימייל או מספר טלפון. אפשר גם להדביק קישור מלא לפרופיל." }), 400);
+    return;
+  }
+  if (password.length < 6 || password.length > 200) {
+    sendConnectPage(response, instagramConnectPage({ token, error: "שדה הסיסמה לא נקלט במלואו. הקלד שוב את סיסמת Instagram ולחץ על חיבור." }), 400);
     return;
   }
   const result = await runInstagramLogin(config, { username, password, code });
