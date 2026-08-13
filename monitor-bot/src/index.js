@@ -795,12 +795,6 @@ function friendlyDownloadError(error) {
 
 async function downloadRequestedMedia(chatId, mediaUrl) {
   const item = mediaItemFromUrl(mediaUrl);
-  if (item.platform === "Instagram" && activeInstagramGuard()) {
-    await telegram.sendMessage(chatId,
-      "⏸️ Instagram נמצא כרגע בהשהיית הגנה. לא אשתמש בסשן המעקב להורדה ידנית בזמן הזה, כדי לא להאריך את ההגבלה."
-    );
-    return;
-  }
   const status = await telegram.sendMessage(chatId, `⬇️ מוריד עכשיו מ-${item.platform}...`);
   let file;
   try {
@@ -817,7 +811,9 @@ async function downloadRequestedMedia(chatId, mediaUrl) {
       message_id: status.message_id,
       text: "✅ ההורדה הושלמה ונשלחה."
     }).catch(() => {});
-    const creator = await resolveCreatorFromMediaUrl(mediaUrl, config);
+    const creator = item.platform === "Instagram"
+      ? null
+      : await resolveCreatorFromMediaUrl(mediaUrl, config);
     await sendTrackingChoice(chatId, mediaUrl, creator);
   } catch (error) {
     if (item.platform === "YouTube" && config.webhookUrl) {
@@ -871,6 +867,12 @@ async function handleCallback(query) {
   try {
     if (kind === "track_all") {
       await queueSubscriptions(query.message.chat.id, action.creators || []);
+      return;
+    }
+    const actionPlatform = action.creator?.platform
+      || (action.mediaUrl ? mediaItemFromUrl(action.mediaUrl).platform : "");
+    if (actionPlatform === "Instagram" && activeInstagramGuard()) {
+      await telegram.sendMessage(query.message.chat.id, "⏸️ הורדת הקישור הציבורי זמינה, אבל הפעלת מעקב Instagram ממתינה לסיום השהיית ההגנה כדי לא לגעת בסשן.");
       return;
     }
     let creator = action.creator;
