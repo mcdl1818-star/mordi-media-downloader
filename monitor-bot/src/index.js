@@ -240,7 +240,7 @@ function isInstagramCookieExport(filename) {
 async function hydrateAuth(platform) {
   const auth = store.state.auth?.[platform];
   if (!auth?.fileId) return false;
-  if (["EXPIRED", "STANDBY"].includes(auth.status)) return false;
+  if (auth.status === "EXPIRED") return false;
   if (platform === "InstagramWeb" && auth.kind === "instagram-web-cookies-v1") {
     const encrypted = path.join(config.dataDir, "instagram-web-cookies.enc");
     const destination = path.join(config.dataDir, "instagram-web-cookies.txt");
@@ -479,7 +479,8 @@ async function saveInstagramWebCookies(cookies, username, { activate = true } = 
       "🔐 גיבוי מוצפן של חיבור Instagram מהטלפון — אין למחוק",
       { filename: "instagram-web-cookies.enc", disableNotification: true }
     );
-    const previousMessageId = store.state.auth?.InstagramWeb?.messageId;
+    const previousAuth = store.state.auth?.InstagramWeb;
+    const previousMessageId = previousAuth?.messageId;
     const bootstrapMessageId = store.state.auth?.InstagramBootstrap?.messageId;
     store.state.auth ||= {};
     store.state.auth.InstagramWeb = {
@@ -488,7 +489,7 @@ async function saveInstagramWebCookies(cookies, username, { activate = true } = 
       filename: "instagram-web-cookies.enc",
       kind: "instagram-web-cookies-v1",
       username,
-      status: "ACTIVE",
+      status: activate ? "ACTIVE" : (previousAuth?.status || "STANDBY"),
       updatedAt: new Date().toISOString()
     };
     if (activate) resetInstagramProtectionAfterConnection();
@@ -598,8 +599,6 @@ async function saveInstagramSession(session, username, { activate = true } = {})
     if (store.state.auth.InstagramWeb) {
       store.state.auth.InstagramWeb.status = "STANDBY";
       store.state.auth.InstagramWeb.updatedAt = new Date().toISOString();
-      delete config.platformCookies.Instagram;
-      await fs.promises.rm(path.join(config.dataDir, "instagram-web-cookies.txt"), { force: true });
     }
     if (activate) resetInstagramProtectionAfterConnection();
     const bootstrapMessageId = store.state.auth.InstagramBootstrap?.messageId;
@@ -953,7 +952,6 @@ async function scanAll({ report = false } = {}) {
           await refreshInstagramPrivateBackupIfChanged().catch(error => console.warn("Instagram private backup refresh:", error.message));
         }
         if (subscription.platform === "Instagram" && config.platformCookies.Instagram) {
-          if (store.state.auth?.InstagramWeb) store.state.auth.InstagramWeb.status = "ACTIVE";
           await refreshInstagramWebBackupIfChanged().catch(error => console.warn("Instagram cookie backup refresh:", error.message));
         }
         if (subscription.pendingBaseline) {
