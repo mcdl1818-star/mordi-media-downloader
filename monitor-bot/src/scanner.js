@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { downloadCobaltVideo } from "./cobalt.js";
+import { downloadCobaltVideo, downloadVxTwitterVideo } from "./cobalt.js";
 
 const PLATFORM_RULES = [
   ["YouTube", /(^|\.)youtube\.com$|^youtu\.be$/],
@@ -669,6 +669,7 @@ export async function downloadVideo(item, config) {
   }
   if (["YouTube", "TikTok", "Facebook", "X"].includes(item.platform)) {
     try {
+      if (item.platform === "X") return await downloadVxTwitterVideo(item, config);
       return await downloadCobaltVideo(item, config);
     } catch (error) {
       // On the hosted monitor, the dedicated worker has a longer lease and an

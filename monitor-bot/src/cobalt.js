@@ -140,3 +140,35 @@ export async function downloadCobaltVideo(item, config, dependencies = {}) {
   }
   throw lastError || new Error("Cobalt video fallback is unavailable");
 }
+
+export async function downloadVxTwitterVideo(item, config, dependencies = {}) {
+  const parsed = new URL(item.url);
+  const match = parsed.pathname.match(/^\/([^/]+)\/status\/(\d+)/i);
+  if (item.platform !== "X" || !match) throw new Error("Invalid X video URL");
+  const fetchImpl = dependencies.fetchImpl || fetch;
+  const endpoint = new URL(`https://api.vxtwitter.com/${encodeURIComponent(match[1])}/status/${match[2]}`);
+  const metadata = await fetchImpl(endpoint, {
+    headers: { accept: "application/json", "user-agent": "mordi-creator-monitor/1.0" },
+    signal: AbortSignal.timeout(20_000)
+  });
+  if (!metadata.ok) throw new Error(`VxTwitter API HTTP ${metadata.status}`);
+  const payload = await metadata.json();
+  const candidates = (Array.isArray(payload.media_extended) ? payload.media_extended : [])
+    .filter(value => value?.type === "video" && typeof value.url === "string")
+    .sort((left, right) => (right.size?.width || 0) - (left.size?.width || 0));
+  const mediaUrl = candidates[0]?.url || (Array.isArray(payload.mediaURLs) ? payload.mediaURLs.find(value => /\.mp4(?:\?|$)/i.test(value)) : "");
+  let media;
+  try { media = new URL(String(mediaUrl || "")); } catch {}
+  if (!media || media.protocol !== "https:" || media.hostname !== "video.twimg.com" || !/\.mp4$/i.test(media.pathname)) {
+    throw new Error("No trusted X video was found");
+  }
+  const directory = path.join(config.tempDir, crypto.randomUUID());
+  await fs.promises.mkdir(directory, { recursive: true });
+  try {
+    const response = await fetchImpl(media, { redirect: "error", signal: AbortSignal.timeout(120_000) });
+    return await saveResponse(response, path.join(directory, "video.mp4"), config.maxBytes);
+  } catch (error) {
+    await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}

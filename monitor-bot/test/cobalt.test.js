@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { downloadCobaltVideo } from "../src/cobalt.js";
+import { downloadCobaltVideo, downloadVxTwitterVideo } from "../src/cobalt.js";
 
 function jsonResponse(value, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
@@ -66,4 +66,35 @@ test("removes a partial file when the Cobalt stream exceeds Telegram limit", asy
       : new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "video/mp4" } })
   }), /exceeds Telegram limit/);
   assert.deepEqual(fs.readdirSync(directory), []);
+});
+
+test("downloads an X video only from VxTwitter metadata and the trusted Twitter CDN", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "monitor-vxtwitter-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const calls = [];
+  const file = await downloadVxTwitterVideo({
+    platform: "X",
+    url: "https://x.com/example/status/123"
+  }, { tempDir: directory, maxBytes: 10 }, {
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      if (new URL(url).hostname === "api.vxtwitter.com") return jsonResponse({
+        media_extended: [{ type: "video", url: "https://video.twimg.com/ext_tw_video/123/video.mp4", size: { width: 720 } }]
+      });
+      return new Response(new Uint8Array([0, 0, 0, 20, 0x66, 0x74, 0x79, 0x70]), { headers: { "content-type": "video/mp4" } });
+    }
+  });
+  assert.equal((await fs.promises.stat(file)).size, 8);
+  assert.equal(calls.length, 2);
+});
+
+test("rejects an untrusted X media host", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "monitor-vxtwitter-host-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  await assert.rejects(() => downloadVxTwitterVideo({
+    platform: "X",
+    url: "https://x.com/example/status/123"
+  }, { tempDir: directory, maxBytes: 10 }, {
+    fetchImpl: async () => jsonResponse({ mediaURLs: ["https://attacker.example/video.mp4"] })
+  }), /No trusted X video/);
 });
