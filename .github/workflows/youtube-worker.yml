@@ -332,7 +332,7 @@ jobs:
           diagnostic="$(tail -n 40 /tmp/youtube-worker-error.log 2>/dev/null \
             | sed -E 's#https?://[^[:space:]]+#<url>#g' \
             | tr '\n' ' ' \
-            | cut -c1-1800)"
+            | tail -c 1800)"
           diagnostic="${diagnostic//'%'/'%25'}"
           diagnostic="${diagnostic//$'\r'/'%0D'}"
           diagnostic="${diagnostic//$'\n'/'%0A'}"
