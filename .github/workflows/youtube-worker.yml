@@ -324,6 +324,14 @@ jobs:
         if: failure() && env.HAS_JOB != 'false'
         shell: bash
         run: |
+          diagnostic="$(tail -n 40 /tmp/youtube-worker-error.log 2>/dev/null \
+            | sed -E 's#https?://[^[:space:]]+#<url>#g' \
+            | tr '\n' ' ' \
+            | cut -c1-1800)"
+          diagnostic="${diagnostic//'%'/'%25'}"
+          diagnostic="${diagnostic//$'\r'/'%0D'}"
+          diagnostic="${diagnostic//$'\n'/'%0A'}"
+          echo "::error title=YouTube fallback diagnostic::${diagnostic:-No worker diagnostic was captured}"
           code="DOWNLOAD_FAILED"
           if grep -Eqi "sign in|not a bot|cookies are no longer valid|HTTP Error 429" /tmp/youtube-worker-error.log 2>/dev/null; then
             code="YOUTUBE_AUTH"
