@@ -341,12 +341,14 @@ export function isLikelyAuthenticationFailure(error) {
 
 export function shouldDeferInstagramScan(subscription, intervalMs, now = Date.now()) {
   if (subscription?.platform !== "Instagram") return false;
+  const scheduled = Date.parse(subscription.nextInstagramCheckAt || "");
+  if (Number.isFinite(scheduled)) return now < scheduled;
   const lastChecked = Date.parse(subscription.lastCheckedAt || "");
   if (!Number.isFinite(lastChecked)) return false;
   const throttled = String(subscription.lastError || "").includes("RATE_LIMIT");
   const cooldownMs = throttled
-    ? 30 * 60_000
-    : Math.min(8 * 60_000, Math.max(2 * 60_000, Number(intervalMs || 0) * 0.75));
+    ? Math.max(2 * 60 * 60_000, Number(intervalMs || 0))
+    : Math.max(15 * 60_000, Number(intervalMs || 0));
   const elapsed = now - lastChecked;
   return elapsed >= 0 && elapsed < cooldownMs;
 }
@@ -381,7 +383,9 @@ async function scanInstagramSession(creator, config) {
   const username = new URL(creator.url).pathname.split("/").filter(Boolean)[0];
   if (!username) throw new Error("לא ניתן לזהות את שם המשתמש ב-Instagram");
   const raw = await new Promise((resolve, reject) => {
-    const child = spawn(config.pythonPath, [config.instagramBridgePath, "scan", "--session", config.instagramSessionPath, username], {
+    const args = [config.instagramBridgePath, "scan", "--session", config.instagramSessionPath, username];
+    if (/^\d+$/.test(String(creator.instagramUserId || ""))) args.push(String(creator.instagramUserId));
+    const child = spawn(config.pythonPath, args, {
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -407,6 +411,7 @@ async function scanInstagramSession(creator, config) {
     throw new Error(`DEFERRED:Instagram:${result.status}`);
   }
   if (result.status !== "OK") throw new Error(result.message || "Instagram scan failed");
+  if (/^\d+$/.test(String(result.userId || ""))) creator.instagramUserId = String(result.userId);
   if (result.settings && typeof result.settings === "object") {
     const temporary = `${config.instagramSessionPath}.${crypto.randomUUID()}.tmp`;
     await fs.promises.writeFile(temporary, JSON.stringify(result.settings), { mode: 0o600 });
@@ -561,17 +566,12 @@ export async function scanCreator(creator, config) {
   if (creator.platform === "Instagram" && config.instagramSessionPath) {
     try {
       const items = await scanInstagramSession(creator, config);
-      if (items.length) return items;
+      // An empty authenticated result is still a successful scan. Falling
+      // through would repeat the same profile through several web extractors.
+      return items;
     } catch (error) {
-      if (String(error.message).startsWith("DEFERRED:Instagram:") && platformCookiePath) {
-        try {
-          const items = await scanGalleryDl(creator, config);
-          if (items.length) return items;
-        } catch {
-          // Preserve the temporary private-session result and retry after backoff.
-        }
-        throw error;
-      }
+      // A rate limit is a signal to stop all Instagram traffic, not to retry the
+      // same profile immediately through the web-cookie fallback.
       if (String(error.message).startsWith("DEFERRED:Instagram:")) throw error;
       if (!platformCookiePath) throw error;
       firstError = error;

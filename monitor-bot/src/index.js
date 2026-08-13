@@ -41,6 +41,7 @@ import {
   verifyYoutubeWorkerToken,
   dispatchYoutubeWorker
 } from "./youtube-worker.js";
+import { activeInstagramGuardState, nextInstagramGuard } from "./instagram-guard.js";
 
 const config = readConfig();
 const telegram = new Telegram(config.token);
@@ -59,6 +60,34 @@ const busyUsers = new Set();
 const ACTION_TTL_MS = 30 * 60_000;
 let lastDownloadDiagnostic = null;
 const YOUTUBE_JOB_TTL_MS = 45 * 60_000;
+
+function resetInstagramProtectionAfterConnection() {
+  delete store.state.instagramGuard;
+  for (const subscription of store.state.subscriptions) {
+    if (subscription.platform !== "Instagram") continue;
+    if (/^(?:AUTH_REQUIRED|DEFERRED):Instagram/.test(String(subscription.lastError || ""))) {
+      subscription.lastError = "";
+    }
+    subscription.nextInstagramCheckAt = "";
+  }
+}
+
+function scheduleNextInstagramScan(subscription, now = Date.now()) {
+  if (subscription?.platform !== "Instagram") return;
+  const jitter = config.instagramJitterMs > 0
+    ? crypto.randomInt(0, Math.floor(config.instagramJitterMs) + 1)
+    : 0;
+  subscription.nextInstagramCheckAt = new Date(now + config.instagramIntervalMs + jitter).toISOString();
+}
+
+function activeInstagramGuard(now = Date.now()) {
+  return activeInstagramGuardState(store.state.instagramGuard, now);
+}
+
+function imposeInstagramGuard(reason, now = Date.now()) {
+  store.state.instagramGuard = nextInstagramGuard(store.state.instagramGuard, reason, config, now);
+  return store.state.instagramGuard;
+}
 
 function pruneYoutubeJobs(now = Date.now()) {
   store.state.youtubeJobs ||= {};
@@ -197,6 +226,13 @@ function instagramConnectMarkup(username = "") {
 }
 
 async function sendInstagramConnect(chatId, username = "") {
+  const guard = activeInstagramGuard();
+  if (guard && guard.reason !== "AUTH_REQUIRED") {
+    const until = new Date(guard.until).toLocaleString("he-IL", { timeZone: "Asia/Jerusalem" });
+    return telegram.sendMessage(chatId,
+      `⏸️ חיבור Instagram עדיין קיים. זוהתה הגבלה זמנית ולכן עצרתי את הסריקות עד ${until}; אין להתחבר שוב ואין להקליד סיסמה בזמן ההשהיה.`
+    );
+  }
   const normalizedUsername = normalizeInstagramUsername(username || config.instagramLoginUsername);
   const replyMarkup = instagramConnectMarkup(normalizedUsername);
   if (!replyMarkup) return telegram.sendMessage(chatId, "חיבור Instagram זמין רק בשירות הענן.");
@@ -288,6 +324,7 @@ async function saveInstagramWebCookies(cookies, username) {
       status: "ACTIVE",
       updatedAt: new Date().toISOString()
     };
+    resetInstagramProtectionAfterConnection();
     delete store.state.auth.InstagramBootstrap;
     config.platformCookies.Instagram = destination;
     config.instagramBootstrapPath = "";
@@ -387,8 +424,10 @@ async function saveInstagramSession(session, username) {
       filename: "instagram-session.enc",
       kind: "instagrapi-v1",
       username,
+      status: "ACTIVE",
       updatedAt: new Date().toISOString()
     };
+    resetInstagramProtectionAfterConnection();
     const bootstrapMessageId = store.state.auth.InstagramBootstrap?.messageId;
     delete store.state.auth.InstagramBootstrap;
     config.instagramSessionPath = destination;
@@ -689,14 +728,30 @@ async function scanAll({ report = false } = {}) {
   let newCount = 0;
   let errorCount = 0;
   let deferredCount = 0;
+  let instagramAttempts = 0;
   try {
     for (const subscription of store.state.subscriptions) {
-      if (shouldDeferInstagramScan(subscription, config.intervalMs)) {
-        deferredCount += 1;
-        continue;
+      if (subscription.platform === "Instagram") {
+        if (activeInstagramGuard()) {
+          deferredCount += 1;
+          continue;
+        }
+        if (shouldDeferInstagramScan(subscription, config.instagramIntervalMs)) {
+          deferredCount += 1;
+          continue;
+        }
+        if (instagramAttempts >= config.instagramMaxProfilesPerPass) {
+          deferredCount += 1;
+          continue;
+        }
+        instagramAttempts += 1;
       }
       try {
         const items = await scanCreator(subscription, config);
+        if (subscription.platform === "Instagram") {
+          delete store.state.instagramGuard;
+          scheduleNextInstagramScan(subscription);
+        }
         if (subscription.platform === "Instagram" && config.instagramSessionPath) {
           await refreshInstagramPrivateBackupIfChanged().catch(error => console.warn("Instagram private backup refresh:", error.message));
         }
@@ -733,21 +788,33 @@ async function scanAll({ report = false } = {}) {
           deferredCount += 1;
           subscription.lastCheckedAt = new Date().toISOString();
           subscription.lastError = String(error.message).slice(0, 300);
+          subscription.nextInstagramCheckAt = "";
+          imposeInstagramGuard(String(error.message).split(":").at(-1));
           await store.save();
           continue;
         }
         errorCount += 1;
         const previousError = subscription.lastError;
         subscription.lastError = String(error.message).slice(0, 300);
-        if (subscription.lastError === "AUTH_REQUIRED:Instagram" && previousError !== subscription.lastError) {
+        if (subscription.lastError === "AUTH_REQUIRED:Instagram") {
+          const alreadyStopped = activeInstagramGuard()?.reason === "AUTH_REQUIRED";
+          subscription.lastCheckedAt = new Date().toISOString();
+          subscription.nextInstagramCheckAt = "";
+          imposeInstagramGuard("AUTH_REQUIRED");
+          if (store.state.auth?.Instagram) {
+            store.state.auth.Instagram.status = "EXPIRED";
+            store.state.auth.Instagram.updatedAt = new Date().toISOString();
+          }
           if (store.state.auth?.InstagramWeb) {
             store.state.auth.InstagramWeb.status = "EXPIRED";
             store.state.auth.InstagramWeb.updatedAt = new Date().toISOString();
           }
-          await telegram.sendMessage(config.allowedUserId,
-            "⚠️ חיבור Instagram פג תוקף. לחץ כדי להתחבר מחדש; רשימת המעקב נשמרה.",
-            { reply_markup: instagramConnectMarkup() }
-          ).catch(console.error);
+          if (!alreadyStopped && previousError !== subscription.lastError) {
+            await telegram.sendMessage(config.allowedUserId,
+              "⚠️ חיבור Instagram פג תוקף. עצרתי את כל סריקות Instagram כדי לא לסכן את החשבון. רשימת המעקב נשמרה; לחץ לחיבור חד-פעמי מחדש.",
+              { reply_markup: instagramConnectMarkup() }
+            ).catch(console.error);
+          }
         }
         console.error(`Scan ${subscription.url}:`, error.message);
       }
@@ -788,6 +855,7 @@ async function addSubscription(chatId, text) {
       lastError: "",
       seenIds: items.map(item => item.id).slice(-500)
     };
+    scheduleNextInstagramScan(subscription);
     store.state.subscriptions.push(subscription);
     await store.save();
     await telegram.call("editMessageText", {
@@ -812,6 +880,7 @@ async function addSubscription(chatId, text) {
         pendingBaseline: true,
         seenIds: []
       };
+      imposeInstagramGuard(errorText.split(":").at(-1));
       store.state.subscriptions.push(subscription);
       await store.save();
       await telegram.call("editMessageText", {
@@ -892,6 +961,17 @@ async function handleMessage(message) {
       lines[0] = instagramWeb.status === "EXPIRED"
         ? "⚠️ Instagram — החיבור מהטלפון דורש חידוש"
         : `✅ Instagram — החיבור מהטלפון פעיל עבור @${instagramWeb.username || config.instagramLoginUsername}`;
+    }
+    const instagramPrivate = store.state.auth?.Instagram;
+    if (!instagramWeb && instagramPrivate && config.instagramSessionPath) {
+      lines[0] = instagramPrivate.status === "EXPIRED" || activeInstagramGuard()?.reason === "AUTH_REQUIRED"
+        ? "⚠️ Instagram — החיבור נעצר ודורש חידוש חד-פעמי"
+        : `✅ Instagram — סשן קבוע פעיל עבור @${instagramPrivate.username || config.instagramLoginUsername}`;
+    }
+    const instagramGuard = activeInstagramGuard();
+    if (instagramGuard && instagramGuard.reason !== "AUTH_REQUIRED") {
+      const until = new Date(instagramGuard.until).toLocaleString("he-IL", { timeZone: "Asia/Jerusalem" });
+      lines[0] = `⏸️ Instagram — החיבור שמור; הסריקות בהשהיית הגנה עד ${until}`;
     }
     const pending = store.state.auth?.InstagramBootstrap;
     if (pending && !config.instagramSessionPath && !config.platformCookies.Instagram) {
@@ -1314,6 +1394,12 @@ async function handleInstagramConnect(request, response, requestUrl) {
     sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, error: "שדה הסיסמה לא נקלט במלואו. הקלד שוב את סיסמת Instagram ולחץ על חיבור." }), 400);
     return;
   }
+  const guard = activeInstagramGuard();
+  if (guard && guard.reason !== "AUTH_REQUIRED") {
+    const until = new Date(guard.until).toLocaleString("he-IL", { timeZone: "Asia/Jerusalem" });
+    sendConnectPage(response, instagramConnectPage({ token, username: lockedUsername, error: `החיבור נשמר, אך Instagram הגבילה זמנית בקשות. כדי להגן על החשבון לא יבוצע ניסיון כניסה נוסף עד ${until}.` }), 429);
+    return;
+  }
   let result;
   try {
     result = await runInstagramLogin(config, {
@@ -1347,7 +1433,9 @@ async function handleInstagramConnect(request, response, requestUrl) {
     return;
   }
   if (result.status === "RATE_LIMIT") {
-    sendConnectPage(response, instagramConnectPage({ token, username, error: "Instagram הגבילה זמנית ניסיונות כניסה. אל תנסה שוב עכשיו; המתן 15 דקות ובקש מהבוט קישור חדש." }), 429);
+    imposeInstagramGuard("RATE_LIMIT");
+    await store.save();
+    sendConnectPage(response, instagramConnectPage({ token, username, error: "Instagram הגבילה זמנית ניסיונות כניסה. עצרתי ניסיונות נוספים כדי להגן על החשבון. המתן שעתיים ובקש מהבוט קישור חדש." }), 429);
     return;
   }
   if (result.status === "LOGIN_BLOCKED") {

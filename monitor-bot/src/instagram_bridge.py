@@ -184,7 +184,7 @@ def story_item(story, username):
 
 def scan():
     from instagrapi import Client
-    if len(sys.argv) != 5 or sys.argv[2] != "--session":
+    if len(sys.argv) not in (5, 6) or sys.argv[2] != "--session":
         output({"status": "ERROR", "message": "Invalid scan arguments"}, 2)
     session_file = Path(sys.argv[3])
     username = sys.argv[4].strip().lstrip("@")
@@ -193,7 +193,7 @@ def scan():
         settings = json.loads(session_file.read_text(encoding="utf-8"))
         client = Client(settings=settings)
         client.delay_range = [2, 4]
-        user_id = client.user_id_from_username(username)
+        user_id = int(sys.argv[5]) if len(sys.argv) == 6 else client.user_id_from_username(username)
         media = list(client.user_medias(user_id, amount=limit))
         items = []
         seen = set()
@@ -209,15 +209,23 @@ def scan():
                 if item and item["media_id"] not in seen:
                     seen.add(item["media_id"])
                     items.append(item)
-        except Exception:
-            pass
+        except Exception as story_error:
+            # A missing/private story tray can be ignored, but authentication
+            # and anti-abuse signals must stop the whole burst immediately.
+            if type(story_error).__name__ in (
+                "LoginRequired", "ClientLoginRequired", "AuthRequired",
+                "ChallengeRequired", "ChallengeUnknownStep",
+                "RetryError", "PleaseWaitFewMinutes", "ClientThrottledError",
+                "RateLimitError", "FeedbackRequired", "SentryBlock",
+            ):
+                raise
         items.sort(key=lambda item: item.get("date", ""), reverse=True)
-        output({"status": "OK", "items": items[:limit], "settings": client.get_settings()})
+        output({"status": "OK", "items": items[:limit], "settings": client.get_settings(), "userId": str(user_id)})
     except Exception as error:
         name = type(error).__name__
-        if name in ("LoginRequired", "ClientLoginRequired", "AuthRequired"):
+        if name in ("LoginRequired", "ClientLoginRequired", "AuthRequired", "ChallengeRequired", "ChallengeUnknownStep"):
             output({"status": "SESSION_EXPIRED"})
-        if name in ("RetryError", "PleaseWaitFewMinutes", "ClientThrottledError", "RateLimitError"):
+        if name in ("RetryError", "PleaseWaitFewMinutes", "ClientThrottledError", "RateLimitError", "FeedbackRequired", "SentryBlock"):
             output({"status": "RATE_LIMIT", "message": "Instagram temporarily rate-limited the scan"}, 2)
         if name in ("ClientConnectionError", "ClientJSONDecodeError", "ClientProxyConnectionError", "ConnectTimeout", "ReadTimeout"):
             output({"status": "NETWORK_ERROR", "message": "Instagram scan had a temporary network error"}, 2)

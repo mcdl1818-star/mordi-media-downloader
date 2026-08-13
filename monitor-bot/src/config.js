@@ -22,10 +22,17 @@ export function readConfig() {
   if (!token) throw new Error("חסר TELEGRAM_BOT_TOKEN");
   if (!/^\d+$/.test(allowedUserId || "")) throw new Error("חסר ALLOWED_TELEGRAM_USER_ID תקין");
   const intervalMinutes = Math.max(2, Number(process.env.CHECK_INTERVAL_MINUTES) || 10);
+  const instagramIntervalMinutes = Math.max(15, Number(process.env.INSTAGRAM_CHECK_INTERVAL_MINUTES) || 20);
+  const instagramJitterMinutes = Math.max(0, Math.min(30, Number(process.env.INSTAGRAM_CHECK_JITTER_MINUTES) || 10));
   return {
     token,
     allowedUserId,
     intervalMs: intervalMinutes * 60_000,
+    instagramIntervalMs: instagramIntervalMinutes * 60_000,
+    instagramJitterMs: instagramJitterMinutes * 60_000,
+    instagramRateLimitCooldownMs: Math.max(60, Number(process.env.INSTAGRAM_RATE_LIMIT_COOLDOWN_MINUTES) || 120) * 60_000,
+    instagramNetworkCooldownMs: Math.max(10, Number(process.env.INSTAGRAM_NETWORK_COOLDOWN_MINUTES) || 30) * 60_000,
+    instagramMaxProfilesPerPass: Math.max(1, Math.min(20, Number(process.env.INSTAGRAM_MAX_PROFILES_PER_PASS) || 6)),
     maxItems: Math.max(3, Math.min(50, Number(process.env.MAX_ITEMS_PER_SCAN) || 15)),
     ytDlpPath: process.env.YT_DLP_PATH?.trim() || "yt-dlp",
     galleryDlPath: process.env.GALLERY_DL_PATH?.trim() || "gallery-dl",

@@ -110,15 +110,17 @@ test("recognizes authentication failures without classifying timeouts as expired
   assert.equal(isLikelyAuthenticationFailure(new Error("request timed out")), false);
 });
 
-test("defers only very recent Instagram scans to avoid account throttling", () => {
+test("defers Instagram scans for the full safe interval or an explicit next-check time", () => {
   const now = Date.parse("2026-08-13T07:00:00Z");
-  const recent = { platform: "Instagram", lastCheckedAt: "2026-08-13T06:55:00Z" };
-  const old = { platform: "Instagram", lastCheckedAt: "2026-08-13T06:50:00Z" };
-  assert.equal(shouldDeferInstagramScan(recent, 10 * 60_000, now), true);
-  assert.equal(shouldDeferInstagramScan(old, 10 * 60_000, now), false);
-  assert.equal(shouldDeferInstagramScan({ ...recent, platform: "YouTube" }, 10 * 60_000, now), false);
-  assert.equal(shouldDeferInstagramScan({ ...old, lastError: "DEFERRED:Instagram:RATE_LIMIT" }, 10 * 60_000, now), true);
-  assert.equal(shouldDeferInstagramScan({ ...old, lastCheckedAt: "2026-08-13T06:29:00Z", lastError: "DEFERRED:Instagram:RATE_LIMIT" }, 10 * 60_000, now), false);
+  const recent = { platform: "Instagram", lastCheckedAt: "2026-08-13T06:45:00Z" };
+  const old = { platform: "Instagram", lastCheckedAt: "2026-08-13T06:39:00Z" };
+  assert.equal(shouldDeferInstagramScan(recent, 20 * 60_000, now), true);
+  assert.equal(shouldDeferInstagramScan(old, 20 * 60_000, now), false);
+  assert.equal(shouldDeferInstagramScan({ ...recent, platform: "YouTube" }, 20 * 60_000, now), false);
+  assert.equal(shouldDeferInstagramScan({ ...old, lastError: "DEFERRED:Instagram:RATE_LIMIT" }, 20 * 60_000, now), true);
+  assert.equal(shouldDeferInstagramScan({ ...old, lastCheckedAt: "2026-08-13T04:59:00Z", lastError: "DEFERRED:Instagram:RATE_LIMIT" }, 20 * 60_000, now), false);
+  assert.equal(shouldDeferInstagramScan({ platform: "Instagram", nextInstagramCheckAt: "2026-08-13T07:01:00Z" }, 20 * 60_000, now), true);
+  assert.equal(shouldDeferInstagramScan({ platform: "Instagram", nextInstagramCheckAt: "2026-08-13T06:59:00Z" }, 20 * 60_000, now), false);
 });
 
 test("recognizes temporary Instagram deferrals as non-authentication failures", () => {
