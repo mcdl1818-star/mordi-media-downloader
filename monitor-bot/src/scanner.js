@@ -398,6 +398,14 @@ export function shouldDeferInstagramScan(subscription, intervalMs, now = Date.no
   return elapsed >= 0 && elapsed < cooldownMs;
 }
 
+export function shouldDeferCreatorScan(subscription, intervalMs, now = Date.now()) {
+  if (!subscription || subscription.platform === "Instagram" || subscription.pendingBaseline) return false;
+  const lastChecked = Date.parse(subscription.lastCheckedAt || "");
+  if (!Number.isFinite(lastChecked)) return false;
+  const elapsed = now - lastChecked;
+  return elapsed >= 0 && elapsed < Math.max(2 * 60_000, Number(intervalMs || 0));
+}
+
 async function scanYtDlp(creator, config) {
   const clients = creator.platform === "YouTube" ? YOUTUBE_CLIENTS : [""];
   let parsed;

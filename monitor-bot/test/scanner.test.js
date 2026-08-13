@@ -13,6 +13,7 @@ import {
   normalizeItems,
   instagramSessionCookieExpired,
   isLikelyAuthenticationFailure,
+  shouldDeferCreatorScan,
   shouldDeferInstagramScan,
   scanCreator,
   youtubeCreatorFromOembed
@@ -140,6 +141,14 @@ test("defers Instagram scans for the full safe interval or an explicit next-chec
   assert.equal(shouldDeferInstagramScan({ ...old, lastCheckedAt: "2026-08-13T04:59:00Z", lastError: "DEFERRED:Instagram:RATE_LIMIT" }, 20 * 60_000, now), false);
   assert.equal(shouldDeferInstagramScan({ platform: "Instagram", nextInstagramCheckAt: "2026-08-13T07:01:00Z" }, 20 * 60_000, now), true);
   assert.equal(shouldDeferInstagramScan({ platform: "Instagram", nextInstagramCheckAt: "2026-08-13T06:59:00Z" }, 20 * 60_000, now), false);
+});
+
+test("does not scan public creator profiles twice when internal and scheduled wakes overlap", () => {
+  const now = Date.parse("2026-08-13T07:00:00Z");
+  assert.equal(shouldDeferCreatorScan({ platform: "TikTok", lastCheckedAt: "2026-08-13T06:55:00Z" }, 10 * 60_000, now), true);
+  assert.equal(shouldDeferCreatorScan({ platform: "TikTok", lastCheckedAt: "2026-08-13T06:49:00Z" }, 10 * 60_000, now), false);
+  assert.equal(shouldDeferCreatorScan({ platform: "X", pendingBaseline: true, lastCheckedAt: "2026-08-13T06:59:00Z" }, 10 * 60_000, now), false);
+  assert.equal(shouldDeferCreatorScan({ platform: "Instagram", lastCheckedAt: "2026-08-13T06:59:00Z" }, 10 * 60_000, now), false);
 });
 
 test("recognizes temporary Instagram deferrals as non-authentication failures", () => {

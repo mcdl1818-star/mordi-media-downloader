@@ -14,7 +14,8 @@ import {
   scanCreator,
   downloadVideo,
   cleanupVideo,
-  shouldDeferInstagramScan
+  shouldDeferInstagramScan,
+  shouldDeferCreatorScan
 } from "./scanner.js";
 import {
   createInstagramConnectToken,
@@ -916,6 +917,7 @@ async function scanAll({ report = false } = {}) {
   let instagramAttempts = 0;
   try {
     for (const subscription of store.state.subscriptions) {
+      if (shouldDeferCreatorScan(subscription, config.intervalMs)) continue;
       if (subscription.platform === "Instagram") {
         if (activeInstagramGuard()) {
           deferredCount += 1;
@@ -1165,11 +1167,19 @@ async function handleMessage(message) {
   const instagramCommand = text.match(/^\/(?:instagram|connect_instagram)(?:@\w+)?(?:\s+(.+))?$/i);
   if (instagramCommand) return sendInstagramConnect(chatId, instagramCommand[1] || "");
   if (text === "/auth") {
-    const lines = ["YouTube", "Instagram", "Facebook", "TikTok", "X"].map(platform => {
-      if (platform === "Instagram") return `${(config.instagramSessionPath || config.platformCookies[platform]) ? "✅" : "⬜"} ${platform}`;
-      const active = Boolean(config.platformCookies[platform]) && store.state.auth?.[platform]?.status !== "EXPIRED";
-      return `${active ? "✅" : "⬜"} ${platform}${active ? " — חיבור מוצפן פעיל" : ""}`;
-    });
+    const socialConnected = platform => Boolean(config.platformCookies[platform])
+      && store.state.auth?.[platform]?.status !== "EXPIRED";
+    const lines = [
+      socialConnected("YouTube")
+        ? "✅ YouTube — הורדה ומעקב ציבורי פעילים; חיבור מוצפן פעיל גם לתוכן מוגבל"
+        : "✅ YouTube — הורדה ומעקב ציבורי פעילים ללא חיבור",
+      "",
+      "✅ TikTok — הורדה ומעקב ציבורי פעילים ללא חיבור",
+      "✅ Facebook — הורדת קישורים פעילה; מעקב Reels של פרופיל עדיין לא זמין",
+      socialConnected("X")
+        ? "✅ X — הורדה ומעקב פרופיל פעילים עם חיבור מוצפן"
+        : "🟡 X — הורדת קישורים פעילה; מעקב פרופיל ממתין לחיבור חד־פעמי"
+    ];
     const instagramPrivate = store.state.auth?.Instagram;
     const instagramWeb = store.state.auth?.InstagramWeb;
     lines[1] = instagramAuthSummary({
@@ -1183,7 +1193,9 @@ async function handleMessage(message) {
     if (pending && !config.instagramSessionPath && !config.platformCookies.Instagram) {
       lines[1] = `⏳ Instagram — החיבור החלקי נשמר עבור @${pending.username || config.instagramLoginUsername}; סיבה: ${pending.reason || pending.status || "ממתין לאישור"}`;
     }
-    return telegram.sendMessage(chatId, `מצב התחברות:\n${lines.join("\n")}`);
+    return telegram.sendMessage(chatId,
+      `מצב יכולות:\n${lines.join("\n")}\n\n⏱️ בדיקה אוטומטית: כל 10 דקות; Instagram כל 20–30 דקות כדי לצמצם חסימות.`
+    );
   }
   if (text === "/list") {
     const lines = store.state.subscriptions.map((item, index) =>
