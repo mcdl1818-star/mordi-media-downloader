@@ -15,6 +15,11 @@ on:
         required: false
         default: ""
         type: string
+      poll_queue:
+        description: Claim the next creator-monitor queue item
+        required: false
+        default: false
+        type: boolean
       url:
         description: YouTube URL for the legacy downloader bot
         required: false
@@ -61,7 +66,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'creator_monitor' || inputs.mode }}
+      DELIVERY_MODE: ${{ (github.event_name == 'schedule' || inputs.poll_queue) && 'creator_monitor' || inputs.mode }}
+      POLL_QUEUE: ${{ inputs.poll_queue }}
       CALLBACK_TOKEN: ${{ inputs.callback_token }}
       SOURCE_URL: ${{ inputs.url }}
       MEDIA_KIND: ${{ inputs.kind }}
@@ -78,12 +84,12 @@ jobs:
 
     steps:
       - name: Claim creator-monitor job
-        if: inputs.mode == 'creator_monitor' || github.event_name == 'schedule'
+        if: inputs.mode == 'creator_monitor' || inputs.poll_queue || github.event_name == 'schedule'
         shell: bash
         run: |
           set -euo pipefail
           test -n "${CREATOR_MONITOR_SCAN_URL}"
-          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" || "${POLL_QUEUE}" == "true" ]]; then
             curl --fail --silent --show-error --retry 3 \
               -X POST "${CREATOR_MONITOR_SCAN_URL}" \
               -F "state=claim_next" \
@@ -118,7 +124,7 @@ jobs:
           printf 'MUTE_VIDEO=false\nEMBED_SUBTITLES=false\n' >> "${GITHUB_ENV}"
 
       - name: Validate legacy Telegram job
-        if: inputs.mode != 'creator_monitor' && github.event_name != 'schedule'
+        if: inputs.mode != 'creator_monitor' && !inputs.poll_queue && github.event_name != 'schedule'
         shell: bash
         run: |
           set -euo pipefail
