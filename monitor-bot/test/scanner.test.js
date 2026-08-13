@@ -14,7 +14,8 @@ import {
   instagramSessionCookieExpired,
   isLikelyAuthenticationFailure,
   shouldDeferInstagramScan,
-  scanCreator
+  scanCreator,
+  youtubeCreatorFromOembed
 } from "../src/scanner.js";
 
 test("accepts supported creator URLs", () => {
@@ -78,6 +79,16 @@ test("extracts obvious creator profiles from individual media URLs", () => {
     platform: "X"
   });
   assert.equal(creatorUrlFromMediaUrl("https://www.instagram.com/reel/ABC/"), null);
+});
+
+test("resolves a YouTube creator through the public oEmbed endpoint", async () => {
+  const creator = await youtubeCreatorFromOembed("https://youtu.be/K3w6dsQnXXU", async url => {
+    assert.equal(new URL(url).hostname, "www.youtube.com");
+    return new Response(JSON.stringify({ author_url: "https://www.youtube.com/@dj_Avi_Kay" }), {
+      headers: { "content-type": "application/json" }
+    });
+  });
+  assert.deepEqual(creator, { url: "https://www.youtube.com/@dj_Avi_Kay", platform: "YouTube" });
 });
 
 test("creates a downloadable item from a supported media link", () => {

@@ -249,11 +249,38 @@ function creatorCandidate(platform, value) {
   return "";
 }
 
+export async function youtubeCreatorFromOembed(input, fetchImpl = fetch) {
+  const media = classifySupportedUrl(input);
+  if (media.platform !== "YouTube" || media.kind !== "media") return null;
+  const endpoint = new URL("https://www.youtube.com/oembed");
+  endpoint.searchParams.set("url", media.url);
+  endpoint.searchParams.set("format", "json");
+  const response = await fetchImpl(endpoint, { signal: AbortSignal.timeout(15_000) });
+  if (!response.ok) return null;
+  const authorUrl = String((await response.json())?.author_url || "");
+  if (!authorUrl) return null;
+  try {
+    const creator = validateCreatorUrl(authorUrl);
+    return creator.platform === "YouTube" ? creator : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function resolveCreatorFromMediaUrl(input, config) {
   const direct = creatorUrlFromMediaUrl(input);
   if (direct) return direct;
   const media = classifySupportedUrl(input);
   if (media.kind !== "media") return validateCreatorUrl(media.url);
+
+  if (media.platform === "YouTube") {
+    try {
+      const creator = await youtubeCreatorFromOembed(media.url);
+      if (creator) return creator;
+    } catch {
+      // Fall through to extractor metadata for unusual or private videos.
+    }
+  }
 
   if (media.platform === "Instagram") {
     try {
