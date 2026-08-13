@@ -921,7 +921,8 @@ async function scanAll({ report = false } = {}) {
   let instagramAttempts = 0;
   try {
     for (const subscription of store.state.subscriptions) {
-      if (shouldDeferCreatorScan(subscription, config.intervalMs)) continue;
+      const platformIntervalMs = subscription.platform === "X" ? config.xIntervalMs : config.intervalMs;
+      if (shouldDeferCreatorScan(subscription, platformIntervalMs)) continue;
       if (subscription.platform === "Instagram") {
         if (activeInstagramGuard()) {
           deferredCount += 1;
@@ -1197,7 +1198,7 @@ async function handleMessage(message) {
       lines[1] = `⏳ Instagram — החיבור החלקי נשמר עבור @${pending.username || config.instagramLoginUsername}; סיבה: ${pending.reason || pending.status || "ממתין לאישור"}`;
     }
     return telegram.sendMessage(chatId,
-      `מצב יכולות:\n${lines.join("\n")}\n\n⏱️ בדיקה אוטומטית: כל 10 דקות; Instagram כל 20–30 דקות כדי לצמצם חסימות.`
+      `מצב יכולות:\n${lines.join("\n")}\n\n⏱️ בדיקה אוטומטית: YouTube, TikTok ו-Facebook כל 10 דקות; Instagram כל 20–30 דקות; X כל 30 דקות.`
     );
   }
   if (text === "/list") {

@@ -75,6 +75,29 @@ test("uses the public X embed before requiring an account session", async () => 
   assert.equal(genericCalls, 0);
 });
 
+test("X uses only one authenticated fallback after the public embed is blocked", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "monitor-x-one-fallback-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const cookie = path.join(directory, "x.txt");
+  fs.writeFileSync(cookie, ".x.com\tTRUE\t/\tTRUE\t4102444800\tauth_token\tsecret\n");
+  let galleryCalls = 0;
+  let genericCalls = 0;
+  const items = await scanCreator({ platform: "X", url: "https://x.com/XFreeze/" }, {
+    platformCookies: { X: cookie }, cookiesPath: "", maxItems: 3
+  }, {
+    scanXSyndication: async () => { throw new Error("X syndication HTTP 429"); },
+    scanGalleryDl: async () => {
+      galleryCalls += 1;
+      return [{ id: "X:1", url: "https://x.com/XFreeze/status/1", platform: "X" }];
+    },
+    scanYtDlp: async () => { genericCalls += 1; return []; },
+    scanProfileHtml: async () => { genericCalls += 1; return []; }
+  });
+  assert.equal(items[0].id, "X:1");
+  assert.equal(galleryCalls, 1);
+  assert.equal(genericCalls, 0);
+});
+
 test("parses unique Reels from the public Facebook Page Plugin", () => {
   const markup = [
     '<a href="/reel/996092996730120/?ref=embed_page">latest</a>',

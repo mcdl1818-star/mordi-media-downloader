@@ -756,6 +756,16 @@ export async function scanCreator(creator, config, dependencies = {}) {
     } catch (error) {
       firstError = error;
     }
+    const xCookiePath = cookiesPathFor("X", config);
+    if (!xCookiePath) throw new Error("AUTH_REQUIRED:X");
+    try {
+      // One authenticated fallback only. Replaying the same profile through
+      // several extractors in one burst increases the chance of an X lockout.
+      return await scanGallery(creator, config);
+    } catch (error) {
+      if (isLikelyAuthenticationFailure(error)) throw new Error("AUTH_REQUIRED:X");
+      throw firstError || error;
+    }
   }
   const needsSession = ["Instagram", "Facebook", "X"].includes(creator.platform);
   const platformCookiePath = cookiesPathFor(creator.platform, config);
