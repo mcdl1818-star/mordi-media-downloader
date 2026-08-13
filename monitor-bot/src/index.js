@@ -1198,7 +1198,7 @@ async function handleMessage(message) {
       lines[1] = `⏳ Instagram — החיבור החלקי נשמר עבור @${pending.username || config.instagramLoginUsername}; סיבה: ${pending.reason || pending.status || "ממתין לאישור"}`;
     }
     return telegram.sendMessage(chatId,
-      `מצב יכולות:\n${lines.join("\n")}\n\n⏱️ בדיקה אוטומטית: YouTube, TikTok ו-Facebook כל 10 דקות; Instagram כל 20–30 דקות; X כל 30 דקות.`
+      `מצב יכולות:\n${lines.join("\n")}\n\n⏱️ בדיקה אוטומטית: YouTube, TikTok ו-Facebook כל 10 דקות; Instagram כל 60–90 דקות ובקשה אחת בכל מחזור; X כל 30 דקות.`
     );
   }
   if (text === "/list") {
