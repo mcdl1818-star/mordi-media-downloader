@@ -62,6 +62,7 @@ const usedInstagramTokens = new Set();
 const instagramConnectAttempts = new Map();
 let instagramWebCookieFingerprint = "";
 let instagramPrivateSessionFingerprint = "";
+let instagramAuthGeneration = 0;
 const pendingActions = new Map();
 const busyUsers = new Set();
 const ACTION_TTL_MS = 30 * 60_000;
@@ -69,6 +70,81 @@ let lastDownloadDiagnostic = null;
 const YOUTUBE_JOB_TTL_MS = 6 * 60 * 60_000;
 const YOUTUBE_JOB_LEASE_MS = 20 * 60_000;
 let youtubeClaimLock = false;
+
+async function atomicPrivateWrite(destination, contents) {
+  const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
+  await fs.promises.writeFile(temporary, contents, { mode: 0o600 });
+  await fs.promises.rename(temporary, destination);
+}
+
+async function applyInstagramScanSource(items) {
+  if (items.instagramSource === "private") {
+    if (store.state.auth?.Instagram) store.state.auth.Instagram.status = "ACTIVE";
+    if (store.state.auth?.InstagramWeb && store.state.auth.InstagramWeb.status !== "EXPIRED") {
+      store.state.auth.InstagramWeb.status = "STANDBY";
+    }
+    return;
+  }
+  if (items.instagramSource !== "web") return;
+  if (store.state.auth?.InstagramWeb) store.state.auth.InstagramWeb.status = "ACTIVE";
+  if (!items.instagramPrivateAuthFailed || !store.state.auth?.Instagram) return;
+  store.state.auth.Instagram.status = "EXPIRED";
+  store.state.auth.Instagram.updatedAt = new Date().toISOString();
+  config.instagramSessionPath = "";
+  await fs.promises.rm(path.join(config.dataDir, "instagram-session.json"), { force: true });
+}
+
+async function expireInstagramSources(sources) {
+  const selected = new Set(Array.isArray(sources) && sources.length
+    ? sources
+    : [config.instagramSessionPath ? "private" : "web"]);
+  const now = new Date().toISOString();
+  if (selected.has("private") && store.state.auth?.Instagram) {
+    store.state.auth.Instagram.status = "EXPIRED";
+    store.state.auth.Instagram.updatedAt = now;
+    config.instagramSessionPath = "";
+    await fs.promises.rm(path.join(config.dataDir, "instagram-session.json"), { force: true });
+  }
+  if (selected.has("web") && store.state.auth?.InstagramWeb) {
+    store.state.auth.InstagramWeb.status = "EXPIRED";
+    store.state.auth.InstagramWeb.updatedAt = now;
+    delete config.platformCookies.Instagram;
+    await fs.promises.rm(path.join(config.dataDir, "instagram-web-cookies.txt"), { force: true });
+  }
+}
+
+async function scanCreatorForManualAction(creator) {
+  if (creator.platform !== "Instagram") return scanCreator(creator, config);
+  if (activeInstagramGuard()) throw new Error("DEFERRED:Instagram:PROTECTED");
+  const generation = instagramAuthGeneration;
+  try {
+    const items = await scanCreator(creator, config);
+    if (generation !== instagramAuthGeneration) {
+      throw new Error("Instagram connection changed during the scan; retry once");
+    }
+    await applyInstagramScanSource(items);
+    await store.save();
+    return items;
+  } catch (error) {
+    if (generation !== instagramAuthGeneration) {
+      throw new Error("Instagram connection changed during the scan; retry once");
+    }
+    if (error.instagramSourcesExpired) {
+      await expireInstagramSources(error.instagramSourcesExpired);
+      await store.save();
+    }
+    if (String(error.message).startsWith("DEFERRED:Instagram:")) {
+      const reason = String(error.message).split(":").at(-1);
+      if (reason !== "PROTECTED") imposeInstagramGuard(reason);
+      await store.save();
+    } else if (String(error.message) === "AUTH_REQUIRED:Instagram") {
+      imposeInstagramGuard("AUTH_REQUIRED");
+      await expireInstagramSources(error.instagramSources);
+      await store.save();
+    }
+    throw error;
+  }
+}
 
 function resetInstagramProtectionAfterConnection() {
   delete store.state.instagramGuard;
@@ -230,6 +306,7 @@ async function hydrateAuth(platform) {
 for (const platform of Object.keys(store.state.auth || {})) {
   await hydrateAuth(platform).catch(error => console.warn(`Auth ${platform}:`, error.message));
 }
+if (config.instagramSessionPath || config.platformCookies.Instagram) instagramAuthGeneration = 1;
 
 function authRequiredMessage(platform) {
   if (platform === "Instagram") {
@@ -384,14 +461,15 @@ async function saveInstagramBootstrap(settings, username, status = "LOGIN_REJECT
   }
 }
 
-async function saveInstagramWebCookies(cookies, username) {
+async function saveInstagramWebCookies(cookies, username, { activate = true } = {}) {
+  if (activate) instagramAuthGeneration += 1;
   const normalizedCookies = normalizeInstagramCookies(cookies);
   const netscape = instagramCookiesToNetscape(normalizedCookies);
   await fs.promises.mkdir(config.dataDir, { recursive: true });
   await fs.promises.mkdir(config.tempDir, { recursive: true });
   const destination = path.join(config.dataDir, "instagram-web-cookies.txt");
   const encrypted = path.join(config.tempDir, `instagram-web-cookies-${crypto.randomUUID()}.enc`);
-  await fs.promises.writeFile(destination, netscape, { mode: 0o600 });
+  await atomicPrivateWrite(destination, netscape);
   await fs.promises.writeFile(encrypted, encryptInstagramSession({ cookies: normalizedCookies }, config.webhookSecret), { mode: 0o600 });
   try {
     const sent = await telegram.sendDocument(
@@ -412,7 +490,7 @@ async function saveInstagramWebCookies(cookies, username) {
       status: "ACTIVE",
       updatedAt: new Date().toISOString()
     };
-    resetInstagramProtectionAfterConnection();
+    if (activate) resetInstagramProtectionAfterConnection();
     delete store.state.auth.InstagramBootstrap;
     config.platformCookies.Instagram = destination;
     config.instagramBootstrapPath = "";
@@ -437,7 +515,7 @@ async function refreshInstagramWebBackupIfChanged() {
   const fingerprint = instagramCookieFingerprint(netscape);
   if (fingerprint === instagramWebCookieFingerprint) return;
   const username = store.state.auth?.InstagramWeb?.username || config.instagramLoginUsername;
-  await saveInstagramWebCookies(instagramCookiesFromNetscape(netscape), username);
+  await saveInstagramWebCookies(instagramCookiesFromNetscape(netscape), username, { activate: false });
 }
 
 async function importInstagramCookieDocument(message) {
@@ -490,12 +568,13 @@ function sendInstagramFileInstructions(chatId) {
 }
 
 async function saveInstagramSession(session, username, { activate = true } = {}) {
+  if (activate) instagramAuthGeneration += 1;
   await fs.promises.mkdir(config.dataDir, { recursive: true });
   const destination = path.join(config.dataDir, "instagram-session.json");
   const encrypted = path.join(config.tempDir, `instagram-session-${crypto.randomUUID()}.enc`);
   await fs.promises.mkdir(config.tempDir, { recursive: true });
   const serialized = JSON.stringify(session);
-  await fs.promises.writeFile(destination, serialized, { mode: 0o600 });
+  await atomicPrivateWrite(destination, serialized);
   await fs.promises.writeFile(encrypted, encryptInstagramSession(session, config.webhookSecret), { mode: 0o600 });
   try {
     const previousMessageId = store.state.auth?.Instagram?.messageId;
@@ -811,7 +890,7 @@ async function handleCallback(query) {
         await telegram.sendMessage(query.message.chat.id, "⏸️ Instagram בהשהיית הגנה. ההורדה האחרונה תתאפשר לאחר שההשהיה תסתיים.");
         return;
       }
-      const items = await scanCreator(creator, config);
+      const items = await scanCreatorForManualAction(creator);
       if (!items.length) throw new Error("לא נמצא תוכן אחרון בפרופיל");
       const subscription = { ...creator, label: profileLabel(creator) };
       await deliver(items[0], subscription, { historical: true });
@@ -852,9 +931,19 @@ async function scanAll({ report = false } = {}) {
         }
         instagramAttempts += 1;
       }
+      const instagramGenerationAtStart = subscription.platform === "Instagram"
+        ? instagramAuthGeneration
+        : -1;
       try {
         const items = await scanCreator(subscription, config);
         if (subscription.platform === "Instagram") {
+          if (instagramGenerationAtStart !== instagramAuthGeneration) {
+            deferredCount += 1;
+            subscription.nextInstagramCheckAt = "";
+            await store.save();
+            continue;
+          }
+          await applyInstagramScanSource(items);
           delete store.state.instagramGuard;
           scheduleNextInstagramScan(subscription);
         }
@@ -890,6 +979,15 @@ async function scanAll({ report = false } = {}) {
         subscription.lastCheckedAt = new Date().toISOString();
         subscription.lastError = "";
       } catch (error) {
+        if (subscription.platform === "Instagram" && instagramGenerationAtStart !== instagramAuthGeneration) {
+          deferredCount += 1;
+          subscription.nextInstagramCheckAt = "";
+          await store.save();
+          continue;
+        }
+        if (subscription.platform === "Instagram" && error.instagramSourcesExpired) {
+          await expireInstagramSources(error.instagramSourcesExpired);
+        }
         if (String(error.message).startsWith("DEFERRED:Instagram:")) {
           deferredCount += 1;
           subscription.lastCheckedAt = new Date().toISOString();
@@ -907,13 +1005,7 @@ async function scanAll({ report = false } = {}) {
           subscription.lastCheckedAt = new Date().toISOString();
           subscription.nextInstagramCheckAt = "";
           imposeInstagramGuard("AUTH_REQUIRED");
-          if (config.instagramSessionPath && store.state.auth?.Instagram) {
-            store.state.auth.Instagram.status = "EXPIRED";
-            store.state.auth.Instagram.updatedAt = new Date().toISOString();
-          } else if (store.state.auth?.InstagramWeb) {
-            store.state.auth.InstagramWeb.status = "EXPIRED";
-            store.state.auth.InstagramWeb.updatedAt = new Date().toISOString();
-          }
+          await expireInstagramSources(error.instagramSources);
           if (!alreadyStopped && previousError !== subscription.lastError) {
             await telegram.sendMessage(config.allowedUserId,
               "⚠️ חיבור Instagram פג תוקף. עצרתי את כל סריקות Instagram כדי לא לסכן את החשבון. רשימת המעקב נשמרה; לחץ לחיבור חד-פעמי מחדש.",
@@ -957,7 +1049,7 @@ async function addSubscription(chatId, text) {
   }
   const status = await telegram.sendMessage(chatId, "🔎 בודק את הכתובת ושומר נקודת התחלה...");
   try {
-    const items = await scanCreator(creator, config);
+    const items = await scanCreatorForManualAction(creator);
     const subscription = {
       ...creator,
       label: new URL(creator.url).pathname.replace(/^\/|\/$/g, "") || new URL(creator.url).hostname,

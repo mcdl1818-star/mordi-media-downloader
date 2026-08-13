@@ -26,6 +26,14 @@ test("backs off rate limits exponentially and caps them at 24 hours", () => {
   assert.equal(Date.parse(eighth.until) - now, 24 * 60 * 60_000);
 });
 
+test("treats an Instagram security challenge as temporary protection, not an expired session", () => {
+  const now = Date.parse("2026-08-13T07:00:00Z");
+  const guard = nextInstagramGuard(null, "CHALLENGE", config, now);
+  assert.equal(Date.parse(guard.until) - now, 2 * 60 * 60_000);
+  assert.equal(activeInstagramGuardState(guard, now + 60 * 60_000), guard);
+  assert.equal(activeInstagramGuardState(guard, now + 3 * 60 * 60_000), null);
+});
+
 test("allows scanning again after a temporary guard expires", () => {
   const now = Date.parse("2026-08-13T07:00:00Z");
   const guard = nextInstagramGuard(null, "NETWORK_ERROR", config, now);

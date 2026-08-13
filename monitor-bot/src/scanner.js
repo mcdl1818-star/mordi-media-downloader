@@ -365,8 +365,23 @@ export function instagramSessionCookieExpired(file, nowSeconds = Math.floor(Date
 }
 
 export function isLikelyAuthenticationFailure(error) {
-  return /(?:auth(?:entication)?[_ -]?required|login[_ -]?required|not logged in|session (?:has )?expired|invalid (?:cookie|session)|cookie.+expired|HTTP 401|challenge_required)/i
+  return /(?:auth(?:entication)?[_ -]?required|login[_ -]?required|not logged in|session (?:has )?expired|invalid (?:cookie|session)|cookie.+expired|HTTP 401)/i
     .test(String(error?.message || error || ""));
+}
+
+function markInstagramScan(items, source, { privateAuthFailed = false } = {}) {
+  if (!Array.isArray(items)) return items;
+  Object.defineProperties(items, {
+    instagramSource: { value: source, enumerable: false },
+    instagramPrivateAuthFailed: { value: Boolean(privateAuthFailed), enumerable: false }
+  });
+  return items;
+}
+
+function instagramAuthenticationError(sources) {
+  const error = new Error("AUTH_REQUIRED:Instagram");
+  error.instagramSources = [...new Set(sources)].filter(source => source === "private" || source === "web");
+  return error;
 }
 
 export function shouldDeferInstagramScan(subscription, intervalMs, now = Date.now()) {
@@ -437,7 +452,7 @@ async function scanInstagramSession(creator, config) {
   });
   const result = JSON.parse(raw);
   if (result.status === "SESSION_EXPIRED") throw new Error("AUTH_REQUIRED:Instagram");
-  if (result.status === "RATE_LIMIT" || result.status === "NETWORK_ERROR") {
+  if (["RATE_LIMIT", "NETWORK_ERROR", "CHALLENGE"].includes(result.status)) {
     throw new Error(`DEFERRED:Instagram:${result.status}`);
   }
   if (result.status !== "OK") throw new Error(result.message || "Instagram scan failed");
@@ -596,20 +611,31 @@ export async function scanCreator(creator, config, dependencies = {}) {
   // The private mobile session is the primary Instagram identity. A stale web
   // cookie must never prevent a valid private session from being tried.
   if (creator.platform === "Instagram" && !config.instagramSessionPath && platformCookiePath && instagramSessionCookieExpired(platformCookiePath)) {
-    throw new Error("AUTH_REQUIRED:Instagram");
+    throw instagramAuthenticationError(["web"]);
   }
   let firstError;
+  let instagramPrivateError;
+  let instagramWebAuthFailed = false;
+  let instagramWebSucceeded = false;
   if (creator.platform === "Instagram" && config.instagramSessionPath) {
     try {
       const items = await scanPrivate(creator, config);
       // An empty authenticated result is still a successful scan. Falling
       // through would repeat the same profile through several web extractors.
-      return items;
+      return markInstagramScan(items, "private");
     } catch (error) {
       // A rate limit is a signal to stop all Instagram traffic, not to retry the
       // same profile immediately through the web-cookie fallback.
       if (String(error.message).startsWith("DEFERRED:Instagram:")) throw error;
-      if (!platformCookiePath) throw error;
+      if (!platformCookiePath) {
+        if (isLikelyAuthenticationFailure(error)) throw instagramAuthenticationError(["private"]);
+        throw error;
+      }
+      instagramPrivateError = error;
+      if (instagramSessionCookieExpired(platformCookiePath)) {
+        if (isLikelyAuthenticationFailure(error)) throw instagramAuthenticationError(["private", "web"]);
+        throw error;
+      }
       firstError = error;
     }
   }
@@ -628,21 +654,55 @@ export async function scanCreator(creator, config, dependencies = {}) {
   }
   try {
     const items = await scanYt(creator, config);
-    if (items.length) return items;
+    if (items.length) {
+      return creator.platform === "Instagram"
+        ? markInstagramScan(items, "web", { privateAuthFailed: isLikelyAuthenticationFailure(instagramPrivateError) })
+        : items;
+    }
   } catch (error) {
     firstError = error;
+    if (creator.platform === "Instagram" && isLikelyAuthenticationFailure(error)) instagramWebAuthFailed = true;
   }
   try {
     const items = await scanGallery(creator, config);
-    if (items.length) return items;
+    if (creator.platform === "Instagram") instagramWebSucceeded = true;
+    if (items.length) {
+      return creator.platform === "Instagram"
+        ? markInstagramScan(items, "web", { privateAuthFailed: isLikelyAuthenticationFailure(instagramPrivateError) })
+        : items;
+    }
   } catch (error) {
     firstError ||= error;
+    if (creator.platform === "Instagram" && isLikelyAuthenticationFailure(error)) instagramWebAuthFailed = true;
   }
   try {
     const items = await scanHtml(creator, config);
-    if (items.length) return items;
+    if (creator.platform === "Instagram") instagramWebSucceeded = true;
+    if (items.length) {
+      return creator.platform === "Instagram"
+        ? markInstagramScan(items, "web", { privateAuthFailed: isLikelyAuthenticationFailure(instagramPrivateError) })
+        : items;
+    }
   } catch (error) {
     firstError ||= error;
+    if (creator.platform === "Instagram" && isLikelyAuthenticationFailure(error)) instagramWebAuthFailed = true;
+  }
+  if (creator.platform === "Instagram") {
+    const privateAuthFailed = isLikelyAuthenticationFailure(instagramPrivateError);
+    if (instagramWebSucceeded) {
+      return markInstagramScan([], "web", { privateAuthFailed });
+    }
+    if (privateAuthFailed && instagramWebAuthFailed) {
+      throw instagramAuthenticationError(["private", "web"]);
+    }
+    if (!config.instagramSessionPath && instagramWebAuthFailed) {
+      throw instagramAuthenticationError(["web"]);
+    }
+    if (privateAuthFailed) {
+      const error = firstError || new Error("Instagram web fallback failed temporarily");
+      error.instagramSourcesExpired = ["private"];
+      throw error;
+    }
   }
   if (needsSession && (!platformCookiePath || isLikelyAuthenticationFailure(firstError))) {
     throw new Error(`AUTH_REQUIRED:${creator.platform}`);

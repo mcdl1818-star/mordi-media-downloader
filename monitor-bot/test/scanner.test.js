@@ -125,6 +125,7 @@ test("recognizes authentication failures without classifying timeouts as expired
   assert.equal(isLikelyAuthenticationFailure(new Error("login_required")), true);
   assert.equal(isLikelyAuthenticationFailure(new Error("HTTP 401")), true);
   assert.equal(isLikelyAuthenticationFailure(new Error("HTTP 403")), false);
+  assert.equal(isLikelyAuthenticationFailure(new Error("challenge_required")), false);
   assert.equal(isLikelyAuthenticationFailure(new Error("request timed out")), false);
 });
 
@@ -168,6 +169,74 @@ test("uses a valid private Instagram session before considering an expired web c
   });
   assert.equal(privateCalls, 1);
   assert.equal(items[0].id, "private:1");
+  assert.equal(items.instagramSource, "private");
+  assert.equal(items.instagramPrivateAuthFailed, false);
+});
+
+test("falls back to valid Instagram web cookies and identifies only the private source as expired", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "monitor-web-fallback-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const cookie = path.join(directory, "instagram.txt");
+  fs.writeFileSync(cookie, ".instagram.com\tTRUE\t/\tTRUE\t4102444800\tsessionid\t12345678901234567890\n");
+  const items = await scanCreator({ platform: "Instagram", url: "https://www.instagram.com/example/" }, {
+    instagramSessionPath: path.join(directory, "private.json"),
+    platformCookies: { Instagram: cookie }, cookiesPath: "", maxItems: 3
+  }, {
+    scanInstagramSession: async () => { throw new Error("AUTH_REQUIRED:Instagram"); },
+    scanYtDlp: async () => [],
+    scanGalleryDl: async () => [{ id: "web:1", platform: "Instagram", url: "https://www.instagram.com/reel/one/" }],
+    scanProfileHtml: async () => assert.fail("HTML fallback should not run after web success")
+  });
+  assert.equal(items[0].id, "web:1");
+  assert.equal(items.instagramSource, "web");
+  assert.equal(items.instagramPrivateAuthFailed, true);
+});
+
+test("reports both Instagram sources when private and web authentication are invalid", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "monitor-both-expired-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const cookie = path.join(directory, "instagram.txt");
+  fs.writeFileSync(cookie, ".instagram.com\tTRUE\t/\tTRUE\t4102444800\tsessionid\t12345678901234567890\n");
+  await assert.rejects(async () => {
+    try {
+      await scanCreator({ platform: "Instagram", url: "https://www.instagram.com/example/" }, {
+        instagramSessionPath: path.join(directory, "private.json"),
+        platformCookies: { Instagram: cookie }, cookiesPath: "", maxItems: 3
+      }, {
+        scanInstagramSession: async () => { throw new Error("login_required"); },
+        scanYtDlp: async () => { throw new Error("HTTP 401"); },
+        scanGalleryDl: async () => { throw new Error("HTTP 401"); },
+        scanProfileHtml: async () => { throw new Error("HTTP 401"); }
+      });
+    } catch (error) {
+      assert.deepEqual(error.instagramSources, ["private", "web"]);
+      throw error;
+    }
+  }, /AUTH_REQUIRED:Instagram/);
+});
+
+test("does not turn a web HTTP 403 into a global Instagram disconnect", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "monitor-web-403-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const cookie = path.join(directory, "instagram.txt");
+  fs.writeFileSync(cookie, ".instagram.com\tTRUE\t/\tTRUE\t4102444800\tsessionid\t12345678901234567890\n");
+  await assert.rejects(async () => {
+    try {
+      await scanCreator({ platform: "Instagram", url: "https://www.instagram.com/example/" }, {
+        instagramSessionPath: path.join(directory, "private.json"),
+        platformCookies: { Instagram: cookie }, cookiesPath: "", maxItems: 3
+      }, {
+        scanInstagramSession: async () => { throw new Error("login_required"); },
+        scanYtDlp: async () => { throw new Error("HTTP 403"); },
+        scanGalleryDl: async () => { throw new Error("HTTP 403"); },
+        scanProfileHtml: async () => { throw new Error("HTTP 403"); }
+      });
+    } catch (error) {
+      assert.notEqual(error.message, "AUTH_REQUIRED:Instagram");
+      assert.deepEqual(error.instagramSourcesExpired, ["private"]);
+      throw error;
+    }
+  }, /HTTP 403/);
 });
 
 test("Facebook monitoring never accepts gallery photo results as Reel updates", async t => {

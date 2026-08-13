@@ -12,10 +12,11 @@ export function nextInstagramGuard(previous, reason, config, now = Date.now()) {
   if (reason === "AUTH_REQUIRED") {
     return { reason, failures, since: new Date(now).toISOString(), until: "" };
   }
-  const base = reason === "RATE_LIMIT"
+  const antiAbuseSignal = reason === "RATE_LIMIT" || reason === "CHALLENGE";
+  const base = antiAbuseSignal
     ? config.instagramRateLimitCooldownMs
     : config.instagramNetworkCooldownMs;
-  const maximum = reason === "RATE_LIMIT" ? 24 * 60 * 60_000 : 2 * 60 * 60_000;
+  const maximum = antiAbuseSignal ? 24 * 60 * 60_000 : 2 * 60 * 60_000;
   const delay = Math.min(maximum, base * (2 ** (failures - 1)));
   return {
     reason,

@@ -223,8 +223,10 @@ def scan():
         output({"status": "OK", "items": items[:limit], "settings": client.get_settings(), "userId": str(user_id)})
     except Exception as error:
         name = type(error).__name__
-        if name in ("LoginRequired", "ClientLoginRequired", "AuthRequired", "ChallengeRequired", "ChallengeUnknownStep"):
+        if name in ("LoginRequired", "ClientLoginRequired", "AuthRequired"):
             output({"status": "SESSION_EXPIRED"})
+        if name in ("ChallengeRequired", "ChallengeUnknownStep"):
+            output({"status": "CHALLENGE", "message": "Instagram requested a temporary security checkpoint"}, 2)
         if name in ("RetryError", "PleaseWaitFewMinutes", "ClientThrottledError", "RateLimitError", "FeedbackRequired", "SentryBlock"):
             output({"status": "RATE_LIMIT", "message": "Instagram temporarily rate-limited the scan"}, 2)
         if name in ("ClientConnectionError", "ClientJSONDecodeError", "ClientProxyConnectionError", "ConnectTimeout", "ReadTimeout"):
