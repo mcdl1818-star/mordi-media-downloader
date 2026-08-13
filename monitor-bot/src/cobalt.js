@@ -2,15 +2,55 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-const DEFAULT_INSTANCES = ["https://co.otomir23.me/"];
+const DEFAULT_INSTANCES = ["https://dog.kittycat.boo/", "https://co.otomir23.me/"];
 const SUPPORTED = new Set(["YouTube", "TikTok", "Facebook", "X"]);
+const DIRECTORY_URL = "https://cobalt.directory/api/working?type=api";
+const DIRECTORY_SERVICE = { YouTube: "youtube", TikTok: "tiktok", Facebook: "facebook", X: "twitter" };
+let directoryCache = { expiresAt: 0, data: {} };
 
-function configuredInstances(config) {
+function checkedInstance(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    if (url.protocol !== "https:" || url.username || url.password || url.port) return null;
+    url.pathname = "/";
+    url.search = "";
+    url.hash = "";
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+async function directoryInstances(platform, fetchImpl) {
+  const now = Date.now();
+  if (directoryCache.expiresAt > now) return directoryCache.data[DIRECTORY_SERVICE[platform]] || [];
+  try {
+    const response = await fetchImpl(DIRECTORY_URL, {
+      headers: { "user-agent": "mordi-creator-monitor/1.0 (+https://github.com/mcdl1818-star/mordi-media-downloader)" },
+      signal: AbortSignal.timeout(10_000)
+    });
+    if (!response.ok) throw new Error(`directory HTTP ${response.status}`);
+    const payload = await response.json();
+    directoryCache = {
+      expiresAt: now + 10 * 60_000,
+      data: payload && typeof payload.data === "object" ? payload.data : {}
+    };
+  } catch {
+    directoryCache.expiresAt = now + 60_000;
+  }
+  return directoryCache.data[DIRECTORY_SERVICE[platform]] || [];
+}
+
+async function configuredInstances(platform, config, fetchImpl) {
   const supplied = Array.isArray(config.cobaltApiUrls) ? config.cobaltApiUrls : [];
-  const values = supplied.length ? supplied : DEFAULT_INSTANCES;
-  return [...new Set(values.map(value => String(value || "").trim()).filter(Boolean))]
-    .map(value => new URL(value))
-    .filter(url => url.protocol === "https:" && !url.username && !url.password);
+  const discovered = supplied.length ? [] : await directoryInstances(platform, fetchImpl);
+  const values = supplied.length ? supplied : [...DEFAULT_INSTANCES, ...discovered];
+  const unique = new Map();
+  for (const value of values) {
+    const url = checkedInstance(value);
+    if (url) unique.set(url.origin, url);
+  }
+  return [...unique.values()].slice(0, 8);
 }
 
 function safeTunnelUrl(raw, instance) {
@@ -69,7 +109,7 @@ export async function downloadCobaltVideo(item, config, dependencies = {}) {
   const fetchImpl = dependencies.fetchImpl || fetch;
   const qualities = item.platform === "YouTube" ? ["360", "240"] : ["720", "480"];
   let lastError;
-  for (const instance of configuredInstances(config)) {
+  for (const instance of await configuredInstances(item.platform, config, fetchImpl)) {
     for (const videoQuality of qualities) {
       let directory = "";
       try {
