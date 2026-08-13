@@ -25,6 +25,10 @@ export class Telegram {
     });
   }
 
+  answerCallbackQuery(id, text = "") {
+    return this.call("answerCallbackQuery", { callback_query_id: id, text });
+  }
+
   async sendVideo(chatId, filePath, caption) {
     const form = new FormData();
     form.set("chat_id", String(chatId));

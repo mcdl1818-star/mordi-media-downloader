@@ -4,9 +4,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 const PLATFORM_RULES = [
-  ["YouTube", /(^|\.)youtube\.com$/],
+  ["YouTube", /(^|\.)youtube\.com$|^youtu\.be$/],
   ["Instagram", /(^|\.)instagram\.com$/],
-  ["Facebook", /(^|\.)facebook\.com$/],
+  ["Facebook", /(^|\.)facebook\.com$|^fb\.watch$/],
   ["TikTok", /(^|\.)tiktok\.com$/],
   ["X", /(^|\.)x\.com$|(^|\.)twitter\.com$/]
 ];
@@ -16,20 +16,78 @@ const EXTRACTOR_ARGS = [
   "--extractor-args", "twitter:api=syndication"
 ];
 
-export function validateCreatorUrl(input) {
+function supportedUrl(input) {
   let url;
   try {
-    url = new URL(String(input).trim());
+    const candidates = String(input || "").match(/https:\/\/[^\s<>"']+/g) || [];
+    const value = (candidates[0] || String(input || "").trim()).replace(/[)\],.!?]+$/, "");
+    url = new URL(value);
   } catch {
     throw new Error("יש לשלוח קישור מלא לפרופיל או לערוץ.");
   }
   const match = PLATFORM_RULES.find(([, rule]) => rule.test(url.hostname.toLowerCase()));
   if (url.protocol !== "https:" || !match) throw new Error("הקישור אינו מפלטפורמה נתמכת.");
-  if (/\/(watch|reel|p|video|status)\b/i.test(url.pathname)) {
+  url.hash = "";
+  return { url, platform: match[0] };
+}
+
+function isSingleMediaUrl(url, platform) {
+  if (platform === "Instagram") return /^\/(?:reel|p|tv)\//i.test(url.pathname);
+  if (platform === "Facebook") return url.hostname === "fb.watch"
+    || /\/(?:reel|watch)(?:\/|$)/i.test(url.pathname)
+    || /\/videos?\//i.test(url.pathname)
+    || url.searchParams.has("v");
+  if (platform === "TikTok") return /\/@[^/]+\/video\/\d+/i.test(url.pathname)
+    || /^(?:vm|vt)\.tiktok\.com$/i.test(url.hostname);
+  if (platform === "X") return /\/[^/]+\/status\/\d+/i.test(url.pathname);
+  if (platform === "YouTube") return url.hostname === "youtu.be"
+    || /\/(?:watch|shorts|live)(?:\/|$)/i.test(url.pathname)
+    || url.searchParams.has("v");
+  return false;
+}
+
+export function classifySupportedUrl(input) {
+  const { url, platform } = supportedUrl(input);
+  return { url: url.toString(), platform, kind: isSingleMediaUrl(url, platform) ? "media" : "profile" };
+}
+
+export function extractSupportedUrls(input) {
+  const candidates = String(input || "").match(/https:\/\/[^\s<>"']+/g) || [];
+  const output = [];
+  for (const candidate of candidates) {
+    try {
+      const classified = classifySupportedUrl(candidate);
+      if (!output.some(item => item.url === classified.url)) output.push(classified);
+    } catch {
+      // Ignore unrelated links when the same message contains supported profiles.
+    }
+  }
+  return output;
+}
+
+export function creatorUrlFromMediaUrl(input) {
+  const media = classifySupportedUrl(input);
+  if (media.kind !== "media") return media;
+  const url = new URL(media.url);
+  const parts = url.pathname.split("/").filter(Boolean);
+  let creatorUrl = "";
+  if (media.platform === "TikTok" && parts[0]?.startsWith("@")) {
+    creatorUrl = `https://www.tiktok.com/${parts[0]}/`;
+  } else if (media.platform === "X" && parts[0] && parts[1]?.toLowerCase() === "status") {
+    creatorUrl = `https://x.com/${parts[0]}/`;
+  } else if (media.platform === "Facebook") {
+    const videosIndex = parts.findIndex(part => /^videos?$/i.test(part));
+    if (videosIndex > 0) creatorUrl = `https://www.facebook.com/${parts.slice(0, videosIndex).join("/")}/`;
+  }
+  return creatorUrl ? validateCreatorUrl(creatorUrl) : null;
+}
+
+export function validateCreatorUrl(input) {
+  const classified = classifySupportedUrl(input);
+  if (classified.kind === "media") {
     throw new Error("זה נראה כמו קישור לפרסום בודד. יש לשלוח קישור לפרופיל/ערוץ.");
   }
-  url.hash = "";
-  return { url: url.toString(), platform: match[0] };
+  return { url: classified.url, platform: classified.platform };
 }
 
 function run(command, args, timeoutMs = 90_000) {
@@ -160,6 +218,84 @@ function cookiesPathFor(platform, config) {
   if (platformPath && fs.existsSync(platformPath)) return platformPath;
   if (config.cookiesPath && fs.existsSync(config.cookiesPath)) return config.cookiesPath;
   return "";
+}
+
+function creatorCandidate(platform, value) {
+  const clean = String(value || "").trim().replace(/^@/, "");
+  if (!clean) return "";
+  if (/^https:\/\//i.test(clean)) return clean;
+  if (platform === "Instagram" && /^[A-Za-z0-9._]{1,30}$/.test(clean)) return `https://www.instagram.com/${clean}/`;
+  if (platform === "TikTok" && /^[A-Za-z0-9._-]{1,40}$/.test(clean)) return `https://www.tiktok.com/@${clean}/`;
+  if (platform === "X" && /^[A-Za-z0-9_]{1,30}$/.test(clean)) return `https://x.com/${clean}/`;
+  if (platform === "Facebook" && /^[A-Za-z0-9._-]{1,100}$/.test(clean)) return `https://www.facebook.com/${clean}/`;
+  if (platform === "YouTube" && /^UC[A-Za-z0-9_-]{20,}$/.test(clean)) return `https://www.youtube.com/channel/${clean}`;
+  if (platform === "YouTube" && /^[A-Za-z0-9._-]{1,100}$/.test(clean)) return `https://www.youtube.com/@${clean.replace(/^@/, "")}`;
+  return "";
+}
+
+export async function resolveCreatorFromMediaUrl(input, config) {
+  const direct = creatorUrlFromMediaUrl(input);
+  if (direct) return direct;
+  const media = classifySupportedUrl(input);
+  if (media.kind !== "media") return validateCreatorUrl(media.url);
+
+  if (media.platform === "Instagram") {
+    try {
+      const parsed = new URL(media.url);
+      const match = parsed.pathname.match(/^\/(?:p|reel|tv)\/([^/]+)/i);
+      if (match) {
+        const response = await fetch(`https://www.instagram.com/p/${match[1]}/embed/captioned/`, {
+          signal: AbortSignal.timeout(20_000),
+          headers: { "user-agent": "Mozilla/5.0" }
+        });
+        if (response.ok) {
+          const usernames = extractInstagramValues(await response.text(), "username");
+          for (const username of usernames) {
+            try { return validateCreatorUrl(`https://www.instagram.com/${username}/`); } catch {}
+          }
+        }
+      }
+    } catch {
+      // Continue to yt-dlp metadata, which also handles authenticated posts.
+    }
+  }
+
+  try {
+    const args = ["--dump-single-json", "--skip-download", "--no-warnings", ...EXTRACTOR_ARGS];
+    const cookiesPath = cookiesPathFor(media.platform, config);
+    if (cookiesPath) args.push("--cookies", cookiesPath);
+    args.push("--", media.url);
+    const info = JSON.parse(await run(config.ytDlpPath, args, 60_000));
+    const candidates = [
+      info.channel_url,
+      info.uploader_url,
+      creatorCandidate(media.platform, info.uploader_id),
+      creatorCandidate(media.platform, info.channel_id),
+      creatorCandidate(media.platform, info.uploader),
+      creatorCandidate(media.platform, info.channel)
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+      try {
+        const creator = validateCreatorUrl(candidate);
+        if (creator.platform === media.platform) return creator;
+      } catch {}
+    }
+  } catch {
+    // The download can still succeed even when creator metadata is unavailable.
+  }
+  return null;
+}
+
+export function mediaItemFromUrl(input) {
+  const media = classifySupportedUrl(input);
+  if (media.kind !== "media") throw new Error("הקישור אינו פרסום או סרטון בודד.");
+  return {
+    id: `${media.platform}:manual:${crypto.createHash("sha256").update(media.url).digest("hex").slice(0, 20)}`,
+    url: media.url,
+    title: "המדיה שביקשת",
+    timestamp: 0,
+    platform: media.platform
+  };
 }
 
 export function instagramSessionCookieExpired(file, nowSeconds = Math.floor(Date.now() / 1000)) {

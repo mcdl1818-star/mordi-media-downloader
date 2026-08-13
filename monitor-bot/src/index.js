@@ -5,7 +5,17 @@ import path from "node:path";
 import { readConfig } from "./config.js";
 import { Telegram } from "./telegram.js";
 import { Store } from "./store.js";
-import { validateCreatorUrl, scanCreator, downloadVideo, cleanupVideo, shouldDeferInstagramScan } from "./scanner.js";
+import {
+  validateCreatorUrl,
+  classifySupportedUrl,
+  extractSupportedUrls,
+  resolveCreatorFromMediaUrl,
+  mediaItemFromUrl,
+  scanCreator,
+  downloadVideo,
+  cleanupVideo,
+  shouldDeferInstagramScan
+} from "./scanner.js";
 import {
   createInstagramConnectToken,
   verifyInstagramConnectToken,
@@ -38,6 +48,9 @@ const usedInstagramTokens = new Set();
 const instagramConnectAttempts = new Map();
 let instagramWebCookieFingerprint = "";
 let instagramPrivateSessionFingerprint = "";
+const pendingActions = new Map();
+const busyUsers = new Set();
+const ACTION_TTL_MS = 30 * 60_000;
 
 function privateSessionFingerprint(value) {
   return crypto.createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
@@ -58,7 +71,9 @@ function consumeInstagramToken(token) {
   ].slice(0, 50);
 }
 
-const help = `שלח קישור לפרופיל או לערוץ כדי להתחיל לעקוב.
+const help = `שלח קישור לפרסום/סרטון בודד כדי להוריד אותו מיד, או קישור לפרופיל/ערוץ כדי לבחור מעקב קבוע.
+
+אחרי הורדה יופיע כפתור להוספת היוצר למעקב.
 
 /list — רשימת המעקבים
 /remove מספר — הסרת מעקב
@@ -406,6 +421,169 @@ async function deliver(item, subscription, { historical = false } = {}) {
   await telegram.sendMessage(config.allowedUserId, caption);
 }
 
+function removeExpiredActions() {
+  const now = Date.now();
+  for (const [id, action] of pendingActions) {
+    if (now - action.createdAt > ACTION_TTL_MS) pendingActions.delete(id);
+  }
+}
+
+function rememberAction(value) {
+  removeExpiredActions();
+  const id = crypto.randomBytes(8).toString("hex");
+  pendingActions.set(id, { ...value, createdAt: Date.now() });
+  return id;
+}
+
+function profileLabel(creator) {
+  return new URL(creator.url).pathname.replace(/^\/|\/$/g, "") || new URL(creator.url).hostname;
+}
+
+function trackingButton(id) {
+  return { inline_keyboard: [[{ text: "➕ הוסף למעקב קבוע", callback_data: `track:${id}` }]] };
+}
+
+async function sendProfileChoice(chatId, creator) {
+  const id = rememberAction({ creator });
+  return telegram.sendMessage(chatId,
+    `👤 זוהה פרופיל ${creator.platform}: ${profileLabel(creator)}\nמה לעשות?`,
+    { reply_markup: { inline_keyboard: [[
+      { text: "🔔 מעקב קבוע", callback_data: `track:${id}` },
+      { text: "⬇️ הורד את האחרון", callback_data: `latest:${id}` }
+    ]] } }
+  );
+}
+
+async function sendBulkProfileChoice(chatId, creators) {
+  const id = rememberAction({ creators });
+  return telegram.sendMessage(chatId,
+    `📋 זוהו ${creators.length} פרופילים. אפשר להוסיף את כולם לרשימת המעקב; הבוט יקבע לכל אחד נקודת התחלה בהדרגה בלי להציף את הרשתות.`,
+    { reply_markup: { inline_keyboard: [[
+      { text: `🔔 הוסף את כל ${creators.length} הפרופילים`, callback_data: `track_all:${id}` }
+    ]] } }
+  );
+}
+
+async function queueSubscriptions(chatId, creators) {
+  let added = 0;
+  let existing = 0;
+  for (const creator of creators) {
+    if (store.state.subscriptions.some(item => item.url === creator.url)) {
+      existing += 1;
+      continue;
+    }
+    store.state.subscriptions.push({
+      ...creator,
+      label: profileLabel(creator),
+      addedAt: new Date().toISOString(),
+      lastCheckedAt: "",
+      lastError: "",
+      pendingBaseline: true,
+      seenIds: []
+    });
+    added += 1;
+  }
+  if (added) await store.save();
+  return telegram.sendMessage(chatId,
+    `✅ נוספו ${added} פרופילים לתור המעקב.${existing ? ` ${existing} כבר היו ברשימה.` : ""}\nהבוט יסרוק אותם אוטומטית, ישמור נקודת התחלה וישלח שלושה תכנים אחרונים מכל פרופיל כשהוא מופעל.`
+  );
+}
+
+async function sendTrackingChoice(chatId, mediaUrl, creator) {
+  const id = rememberAction({ mediaUrl, creator });
+  const detail = creator
+    ? `זיהיתי את היוצר ${profileLabel(creator)}.`
+    : "לא הצלחתי לזהות את כתובת היוצר מהפרסום; אפשר ללחוץ ואנסה שוב.";
+  return telegram.sendMessage(chatId, `✅ ההורדה הסתיימה. ${detail}`, { reply_markup: trackingButton(id) });
+}
+
+function friendlyDownloadError(error) {
+  const message = String(error?.message || "");
+  if (/auth|login|cookie|HTTP (?:401|403)/i.test(message)) return "האתר דורש חיבור פעיל או חסם זמנית את ההורדה.";
+  if (/private|unavailable|deleted|restricted/i.test(message)) return "התוכן פרטי, הוסר או אינו זמין.";
+  if (/timed? out|לא סיים בזמן/i.test(message)) return "האתר לא הגיב בזמן. נסה שוב מאוחר יותר.";
+  return message.slice(0, 220) || "ההורדה נכשלה זמנית.";
+}
+
+async function downloadRequestedMedia(chatId, mediaUrl) {
+  const item = mediaItemFromUrl(mediaUrl);
+  const status = await telegram.sendMessage(chatId, `⬇️ מוריד עכשיו מ-${item.platform}...`);
+  let file;
+  try {
+    file = await downloadVideo(item, config);
+    const size = (await fs.promises.stat(file)).size;
+    if (size > config.maxBytes) throw new Error("הקובץ גדול ממגבלת Telegram");
+    const caption = `✅ הורד מ-${item.platform}\n${item.url}`;
+    if (/\.(?:jpe?g|png|webp)$/i.test(file)) await telegram.sendPhoto(chatId, file, caption);
+    else await telegram.sendVideo(chatId, file, caption);
+    await telegram.call("editMessageText", {
+      chat_id: chatId,
+      message_id: status.message_id,
+      text: "✅ ההורדה הושלמה ונשלחה."
+    }).catch(() => {});
+    const creator = await resolveCreatorFromMediaUrl(mediaUrl, config);
+    await sendTrackingChoice(chatId, mediaUrl, creator);
+  } catch (error) {
+    await telegram.call("editMessageText", {
+      chat_id: chatId,
+      message_id: status.message_id,
+      text: `❌ ${friendlyDownloadError(error)}`
+    }).catch(() => {});
+  } finally {
+    if (file) await cleanupVideo(file).catch(console.error);
+  }
+}
+
+async function handleCallback(query) {
+  const userId = String(query.from?.id || "");
+  if (userId !== config.allowedUserId) return;
+  removeExpiredActions();
+  const separator = String(query.data || "").indexOf(":");
+  const kind = separator > 0 ? query.data.slice(0, separator) : "";
+  const id = separator > 0 ? query.data.slice(separator + 1) : "";
+  const action = pendingActions.get(id);
+  if (!action) {
+    await telegram.answerCallbackQuery(query.id, "הכפתור פג. שלח את הקישור מחדש.");
+    return;
+  }
+  if (busyUsers.has(userId)) {
+    await telegram.answerCallbackQuery(query.id, "כבר מתבצעת פעולה. המתן לסיומה.");
+    return;
+  }
+  await telegram.answerCallbackQuery(query.id, kind.startsWith("track") ? "מוסיף למעקב..." : "מוריד את התוכן האחרון...");
+  busyUsers.add(userId);
+  try {
+    if (kind === "track_all") {
+      await queueSubscriptions(query.message.chat.id, action.creators || []);
+      return;
+    }
+    let creator = action.creator;
+    if (!creator && action.mediaUrl) creator = await resolveCreatorFromMediaUrl(action.mediaUrl, config);
+    if (!creator) {
+      await telegram.sendMessage(query.message.chat.id, "לא הצלחתי לזהות את היוצר אוטומטית. שלח קישור לפרופיל עצמו ואציג כפתור מעקב.");
+      return;
+    }
+    if (kind === "track") {
+      await addSubscription(query.message.chat.id, creator.url);
+      return;
+    }
+    if (kind === "latest") {
+      const items = await scanCreator(creator, config);
+      if (!items.length) throw new Error("לא נמצא תוכן אחרון בפרופיל");
+      const subscription = { ...creator, label: profileLabel(creator) };
+      await deliver(items[0], subscription, { historical: true });
+      const nextId = rememberAction({ creator });
+      await telegram.sendMessage(query.message.chat.id, "רוצה לקבל מעכשיו כל תוכן חדש?", { reply_markup: trackingButton(nextId) });
+      return;
+    }
+    await telegram.sendMessage(query.message.chat.id, "הפעולה אינה מוכרת. שלח את הקישור מחדש.");
+  } catch (error) {
+    await telegram.sendMessage(query.message.chat.id, `❌ ${friendlyDownloadError(error)}`);
+  } finally {
+    busyUsers.delete(userId);
+  }
+}
+
 async function scanAll({ report = false } = {}) {
   if (scanRunning) return report ? "כבר מתבצעת בדיקה." : undefined;
   if (store.state.paused) return report ? "המעקב מושהה." : undefined;
@@ -427,6 +605,19 @@ async function scanAll({ report = false } = {}) {
         if (subscription.platform === "Instagram" && config.platformCookies.Instagram) {
           if (store.state.auth?.InstagramWeb) store.state.auth.InstagramWeb.status = "ACTIVE";
           await refreshInstagramWebBackupIfChanged().catch(error => console.warn("Instagram cookie backup refresh:", error.message));
+        }
+        if (subscription.pendingBaseline) {
+          subscription.seenIds = items.map(item => item.id).slice(-500);
+          subscription.pendingBaseline = false;
+          subscription.lastCheckedAt = new Date().toISOString();
+          subscription.lastError = "";
+          await store.save();
+          const history = items.slice(0, config.historyCount).reverse();
+          await telegram.sendMessage(config.allowedUserId,
+            `✅ המעקב הופעל: ${subscription.label}\nנשמרו ${items.length} פרסומים קיימים. הנה ${history.length} אחרונים לזיהוי.`
+          );
+          for (const item of history) await deliver(item, subscription, { historical: true });
+          continue;
         }
         const known = new Set(subscription.seenIds);
         const fresh = items.filter(item => !known.has(item.id)).reverse();
@@ -513,6 +704,25 @@ async function addSubscription(chatId, text) {
     }
   } catch (error) {
     const errorText = String(error.message);
+    if (errorText.startsWith("DEFERRED:Instagram:")) {
+      const subscription = {
+        ...creator,
+        label: new URL(creator.url).pathname.replace(/^\/|\/$/g, "") || new URL(creator.url).hostname,
+        addedAt: new Date().toISOString(),
+        lastCheckedAt: new Date().toISOString(),
+        lastError: errorText.slice(0, 300),
+        pendingBaseline: true,
+        seenIds: []
+      };
+      store.state.subscriptions.push(subscription);
+      await store.save();
+      await telegram.call("editMessageText", {
+        chat_id: chatId,
+        message_id: status.message_id,
+        text: `✅ ${subscription.label} נוסף לרשימה וממתין לסריקה בטוחה. Instagram הגבילה זמנית את הקצב; הבוט יקבע נקודת התחלה אוטומטית במחזור הבא שיצליח ולא ישלח תוכן ישן כהתראה חדשה.`
+      });
+      return;
+    }
     if (errorText.startsWith("AUTH_REQUIRED:")) {
       const platform = errorText.split(":")[1];
       await telegram.call("editMessageText", {
@@ -535,6 +745,7 @@ async function handleMessage(message) {
   if (String(message.from?.id || "") !== config.allowedUserId) return;
   const chatId = message.chat.id;
   const text = message.text?.trim() || "";
+  removeExpiredActions();
   if (message.document) {
     const filename = message.document.file_name?.toLowerCase() || "";
     const platform = AUTH_FILES[filename];
@@ -600,11 +811,32 @@ async function handleMessage(message) {
     return telegram.sendMessage(chatId, store.state.paused ? "⏸️ כל המעקבים הושהו." : "▶️ המעקבים חודשו.");
   }
   if (text === "/check") return telegram.sendMessage(chatId, await scanAll({ report: true }));
-  return addSubscription(chatId, text);
+  try {
+    const links = extractSupportedUrls(text);
+    if (links.length > 1) {
+      if (links.some(item => item.kind !== "profile")) {
+        return telegram.sendMessage(chatId, "אפשר לשלוח רשימה של קישורי פרופילים יחד. קישורים לסרטונים בודדים יש לשלוח אחד בכל הודעה כדי שאוריד אותם מיד.");
+      }
+      return sendBulkProfileChoice(chatId, links.map(item => validateCreatorUrl(item.url)));
+    }
+    const classified = classifySupportedUrl(text);
+    if (classified.kind === "profile") return sendProfileChoice(chatId, validateCreatorUrl(classified.url));
+    const userId = String(message.from.id);
+    if (busyUsers.has(userId)) return telegram.sendMessage(chatId, "כבר מתבצעת הורדה. המתן לסיומה.");
+    busyUsers.add(userId);
+    try {
+      return await downloadRequestedMedia(chatId, classified.url);
+    } finally {
+      busyUsers.delete(userId);
+    }
+  } catch (error) {
+    return telegram.sendMessage(chatId, `❌ ${friendlyDownloadError(error)}`);
+  }
 }
 
 async function dispatchUpdate(update) {
   if (update.message) await handleMessage(update.message);
+  if (update.callback_query) await handleCallback(update.callback_query);
 }
 
 function configureBotCommands() {
@@ -914,7 +1146,7 @@ async function startWebhook() {
   await telegram.call("setWebhook", {
     url: `${config.webhookUrl}${webhookPath}`,
     secret_token: safeSecret,
-    allowed_updates: ["message"],
+    allowed_updates: ["message", "callback_query"],
     drop_pending_updates: false
   });
   await configureBotCommands();
@@ -932,7 +1164,7 @@ async function poll() {
       const updates = await telegram.call("getUpdates", {
         offset,
         timeout: 30,
-        allowed_updates: ["message"]
+        allowed_updates: ["message", "callback_query"]
       });
       for (const update of updates) {
         offset = update.update_id + 1;

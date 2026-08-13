@@ -5,6 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import {
   validateCreatorUrl,
+  classifySupportedUrl,
+  extractSupportedUrls,
+  creatorUrlFromMediaUrl,
+  mediaItemFromUrl,
   parseYouTubeFeed,
   normalizeItems,
   instagramSessionCookieExpired,
@@ -48,6 +52,45 @@ test("normalizes each Instagram story with its stable ID and direct media", () =
     directMediaUrl: "https://cdn.example/story.mp4",
     mediaKind: "video"
   }]);
+});
+
+test("classifies profile links separately from individual media", () => {
+  assert.equal(classifySupportedUrl("https://www.instagram.com/openai/").kind, "profile");
+  assert.equal(classifySupportedUrl("https://www.instagram.com/reel/ABC/").kind, "media");
+  assert.equal(classifySupportedUrl("https://www.facebook.com/reel/123").kind, "media");
+  assert.equal(classifySupportedUrl("https://www.tiktok.com/@creator/video/123").kind, "media");
+  assert.equal(classifySupportedUrl("https://x.com/creator/status/123").kind, "media");
+});
+
+test("extracts obvious creator profiles from individual media URLs", () => {
+  assert.deepEqual(creatorUrlFromMediaUrl("https://www.tiktok.com/@creator/video/123"), {
+    url: "https://www.tiktok.com/@creator/",
+    platform: "TikTok"
+  });
+  assert.deepEqual(creatorUrlFromMediaUrl("https://x.com/creator/status/123"), {
+    url: "https://x.com/creator/",
+    platform: "X"
+  });
+  assert.equal(creatorUrlFromMediaUrl("https://www.instagram.com/reel/ABC/"), null);
+});
+
+test("creates a downloadable item from a supported media link", () => {
+  const item = mediaItemFromUrl("קישור: https://x.com/creator/status/123");
+  assert.equal(item.platform, "X");
+  assert.equal(item.url, "https://x.com/creator/status/123");
+  assert.match(item.id, /^X:manual:/);
+});
+
+test("extracts a batch of supported profile links from one message", () => {
+  const links = extractSupportedUrls(`
+    https://www.instagram.com/openai/
+    unrelated https://example.com/nope
+    https://www.tiktok.com/@openai
+  `);
+  assert.deepEqual(links.map(item => [item.platform, item.kind]), [
+    ["Instagram", "profile"],
+    ["TikTok", "profile"]
+  ]);
 });
 
 test("detects a missing or expired Instagram session cookie", t => {
