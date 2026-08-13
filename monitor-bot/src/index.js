@@ -51,6 +51,7 @@ let instagramPrivateSessionFingerprint = "";
 const pendingActions = new Map();
 const busyUsers = new Set();
 const ACTION_TTL_MS = 30 * 60_000;
+let lastDownloadDiagnostic = null;
 
 function privateSessionFingerprint(value) {
   return crypto.createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
@@ -524,6 +525,12 @@ async function downloadRequestedMedia(chatId, mediaUrl) {
     const creator = await resolveCreatorFromMediaUrl(mediaUrl, config);
     await sendTrackingChoice(chatId, mediaUrl, creator);
   } catch (error) {
+    lastDownloadDiagnostic = {
+      at: new Date().toISOString(),
+      platform: item.platform,
+      message: String(error?.message || error).slice(-1600)
+    };
+    console.error(`Direct download ${item.platform}:`, error.message);
     await telegram.call("editMessageText", {
       chat_id: chatId,
       message_id: status.message_id,
@@ -773,6 +780,12 @@ async function handleMessage(message) {
     return telegram.sendMessage(chatId, `✅ ההתחברות ל-${platform} נשמרה בענן. אפשר לשלוח עכשיו את קישור הפרופיל.`);
   }
   if (text === "/start" || text === "/help") return telegram.sendMessage(chatId, help);
+  if (text === "/diagnostics") {
+    const value = lastDownloadDiagnostic;
+    return telegram.sendMessage(chatId, value
+      ? `אבחון הורדה אחרון (${value.platform}, ${value.at}):\n${value.message}`
+      : "אין עדיין אבחון הורדה במופע השרת הנוכחי.");
+  }
   if (/^\/instagram_file(?:@\w+)?$/i.test(text)) return sendInstagramFileInstructions(chatId);
   const instagramCommand = text.match(/^\/(?:instagram|connect_instagram)(?:@\w+)?(?:\s+(.+))?$/i);
   if (instagramCommand) return sendInstagramConnect(chatId, instagramCommand[1] || "");
