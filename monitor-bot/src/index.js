@@ -582,6 +582,7 @@ function friendlyDownloadError(error) {
   const message = String(error?.message || "");
   if (/auth|login|cookie|HTTP (?:401|403)/i.test(message)) return "האתר דורש חיבור פעיל או חסם זמנית את ההורדה.";
   if (/private|unavailable|deleted|restricted/i.test(message)) return "התוכן פרטי, הוסר או אינו זמין.";
+  if (/no video|no media|no formats|does not contain|not a video/i.test(message)) return "לא נמצא סרטון בקישור הזה. ייתכן שזה פוסט טקסט, תמונה או קישור ללא מדיה.";
   if (/timed? out|לא סיים בזמן/i.test(message)) return "האתר לא הגיב בזמן. נסה שוב מאוחר יותר.";
   return message.slice(0, 220) || "ההורדה נכשלה זמנית.";
 }

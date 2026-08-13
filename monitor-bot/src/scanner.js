@@ -633,14 +633,20 @@ export async function downloadVideo(item, config) {
         for (const name of await fs.promises.readdir(directory)) {
           await fs.promises.rm(path.join(directory, name), { recursive: true, force: true });
         }
+        const ffmpegLocationArgs = config.ffmpegPath && /[\\/]/.test(config.ffmpegPath)
+          ? ["--ffmpeg-location", config.ffmpegPath]
+          : [];
         const args = [
           "--no-playlist",
           ...extractorArgs(item.url, client),
-          "--ffmpeg-location", config.ffmpegPath,
+          ...ffmpegLocationArgs,
           "-f", format,
           "--merge-output-format", "mp4",
           "-o", output
         ];
+        // yt-dlp already discovers a PATH-installed ffmpeg. Passing the bare
+        // word "ffmpeg" to --ffmpeg-location is interpreted as a directory
+        // and produces a misleading warning on Render.
         const cookiesPath = cookiesPathFor(item.platform, config);
         if (cookiesPath) args.push("--cookies", cookiesPath);
         args.push("--", item.url);
