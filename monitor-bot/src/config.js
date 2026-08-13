@@ -24,6 +24,7 @@ export function readConfig() {
   const intervalMinutes = Math.max(2, Number(process.env.CHECK_INTERVAL_MINUTES) || 10);
   const instagramIntervalMinutes = Math.max(15, Number(process.env.INSTAGRAM_CHECK_INTERVAL_MINUTES) || 20);
   const instagramJitterMinutes = Math.max(0, Math.min(30, Number(process.env.INSTAGRAM_CHECK_JITTER_MINUTES) || 10));
+  const webhookUrl = process.env.WEBHOOK_URL?.trim().replace(/\/$/, "") || "";
   return {
     token,
     allowedUserId,
@@ -52,7 +53,9 @@ export function readConfig() {
     tempDir: path.resolve(process.env.TEMP_DIR?.trim() || "temp"),
     cookiesPath: process.env.COOKIES_PATH?.trim() ? path.resolve(process.env.COOKIES_PATH.trim()) : "",
     port: Number(process.env.PORT) || 10000,
-    webhookUrl: process.env.WEBHOOK_URL?.trim().replace(/\/$/, "") || "",
+    webhookUrl,
+    cloudKeepAliveEnabled: process.env.CLOUD_KEEP_ALIVE?.trim().toLowerCase() !== "false",
+    cloudKeepAliveIntervalMs: Math.max(5, Math.min(12, Number(process.env.CLOUD_KEEP_ALIVE_MINUTES) || 10)) * 60_000,
     webhookSecret: process.env.WEBHOOK_SECRET?.trim() || "",
     historyCount: Math.max(1, Math.min(5, Number(process.env.HISTORY_COUNT) || 3))
   };

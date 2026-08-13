@@ -30,6 +30,7 @@ import {
   runInstagramLogin,
   runInstagramSessionImport
 } from "./instagram-connect.js";
+import { startCloudKeepAlive } from "./cloud-keepalive.js";
 import {
   normalizeInstagramCookies,
   instagramCookiesToNetscape,
@@ -1812,6 +1813,13 @@ async function poll() {
 
 if (config.webhookUrl) {
   await startWebhook();
+  const keepAlive = startCloudKeepAlive({
+    webhookUrl: config.webhookUrl,
+    enabled: config.cloudKeepAliveEnabled,
+    intervalMs: config.cloudKeepAliveIntervalMs,
+    onError: error => console.error("Cloud keepalive:", error.message)
+  });
+  if (keepAlive) console.log(`Creator monitor keepalive active; interval ${keepAlive.intervalMs / 60_000} minutes`);
   setInterval(() => void scanAll().catch(console.error), config.intervalMs).unref();
   void scanAll().catch(console.error);
   console.log(`Creator monitor cloud scan active; interval ${config.intervalMs / 60_000} minutes`);
