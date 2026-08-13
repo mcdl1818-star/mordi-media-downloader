@@ -78,7 +78,13 @@ def login():
             result("LOGIN_REJECTED")
         output({"status": "OK", "username": username, "session": settings})
     except Exception as error:
-        name = type(error).__name__
+        root_error = error
+        if type(error).__name__ == "RetryError" and hasattr(error, "last_attempt"):
+            try:
+                root_error = error.last_attempt.exception() or error
+            except Exception:
+                root_error = error
+        name = type(root_error).__name__
         last_json = client.last_json if client is not None and isinstance(getattr(client, "last_json", None), dict) else {}
         signals = " ".join(str(value) for value in (
             error,
