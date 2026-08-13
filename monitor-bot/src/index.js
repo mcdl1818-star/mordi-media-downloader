@@ -5,7 +5,7 @@ import path from "node:path";
 import { readConfig } from "./config.js";
 import { Telegram } from "./telegram.js";
 import { Store } from "./store.js";
-import { validateCreatorUrl, scanCreator, downloadVideo, cleanupVideo } from "./scanner.js";
+import { validateCreatorUrl, scanCreator, downloadVideo, cleanupVideo, shouldDeferInstagramScan } from "./scanner.js";
 import {
   createInstagramConnectToken,
   verifyInstagramConnectToken,
@@ -37,6 +37,11 @@ let scanRunning = false;
 const usedInstagramTokens = new Set();
 const instagramConnectAttempts = new Map();
 let instagramWebCookieFingerprint = "";
+let instagramPrivateSessionFingerprint = "";
+
+function privateSessionFingerprint(value) {
+  return crypto.createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
+}
 
 function instagramTokenWasUsed(token) {
   const fingerprint = instagramConnectTokenFingerprint(token);
@@ -118,7 +123,9 @@ async function hydrateAuth(platform) {
     await telegram.downloadFile(auth.fileId, encrypted);
     try {
       const session = decryptInstagramSession(await fs.promises.readFile(encrypted), config.webhookSecret);
-      await fs.promises.writeFile(destination, JSON.stringify(session), { mode: 0o600 });
+      const serialized = JSON.stringify(session);
+      await fs.promises.writeFile(destination, serialized, { mode: 0o600 });
+      instagramPrivateSessionFingerprint = privateSessionFingerprint(serialized);
       config.instagramSessionPath = destination;
       return true;
     } finally {
@@ -327,9 +334,11 @@ async function saveInstagramSession(session, username) {
   const destination = path.join(config.dataDir, "instagram-session.json");
   const encrypted = path.join(config.tempDir, `instagram-session-${crypto.randomUUID()}.enc`);
   await fs.promises.mkdir(config.tempDir, { recursive: true });
-  await fs.promises.writeFile(destination, JSON.stringify(session), { mode: 0o600 });
+  const serialized = JSON.stringify(session);
+  await fs.promises.writeFile(destination, serialized, { mode: 0o600 });
   await fs.promises.writeFile(encrypted, encryptInstagramSession(session, config.webhookSecret), { mode: 0o600 });
   try {
+    const previousMessageId = store.state.auth?.Instagram?.messageId;
     const sent = await telegram.sendDocument(
       config.allowedUserId,
       encrypted,
@@ -339,6 +348,7 @@ async function saveInstagramSession(session, username) {
     store.state.auth ||= {};
     store.state.auth.Instagram = {
       fileId: sent.document.file_id,
+      messageId: sent.message_id,
       filename: "instagram-session.enc",
       kind: "instagrapi-v1",
       username,
@@ -347,15 +357,29 @@ async function saveInstagramSession(session, username) {
     const bootstrapMessageId = store.state.auth.InstagramBootstrap?.messageId;
     delete store.state.auth.InstagramBootstrap;
     config.instagramSessionPath = destination;
+    instagramPrivateSessionFingerprint = privateSessionFingerprint(serialized);
     config.instagramBootstrapPath = "";
     await fs.promises.rm(path.join(config.dataDir, "instagram-bootstrap.json"), { force: true });
     await store.save();
     if (bootstrapMessageId) {
       await telegram.call("deleteMessage", { chat_id: config.allowedUserId, message_id: bootstrapMessageId }).catch(() => {});
     }
+    if (previousMessageId && previousMessageId !== sent.message_id) {
+      await telegram.call("deleteMessage", { chat_id: config.allowedUserId, message_id: previousMessageId }).catch(() => {});
+    }
   } finally {
     await fs.promises.rm(encrypted, { force: true });
   }
+}
+
+async function refreshInstagramPrivateBackupIfChanged() {
+  const sessionFile = config.instagramSessionPath;
+  if (!sessionFile || !fs.existsSync(sessionFile)) return;
+  const serialized = await fs.promises.readFile(sessionFile, "utf8");
+  const fingerprint = privateSessionFingerprint(serialized);
+  if (fingerprint === instagramPrivateSessionFingerprint) return;
+  const username = store.state.auth?.Instagram?.username || config.instagramLoginUsername;
+  await saveInstagramSession(JSON.parse(serialized), username);
 }
 
 async function deliver(item, subscription, { historical = false } = {}) {
@@ -388,10 +412,18 @@ async function scanAll({ report = false } = {}) {
   scanRunning = true;
   let newCount = 0;
   let errorCount = 0;
+  let deferredCount = 0;
   try {
     for (const subscription of store.state.subscriptions) {
+      if (shouldDeferInstagramScan(subscription, config.intervalMs)) {
+        deferredCount += 1;
+        continue;
+      }
       try {
         const items = await scanCreator(subscription, config);
+        if (subscription.platform === "Instagram" && config.instagramSessionPath) {
+          await refreshInstagramPrivateBackupIfChanged().catch(error => console.warn("Instagram private backup refresh:", error.message));
+        }
         if (subscription.platform === "Instagram" && config.platformCookies.Instagram) {
           if (store.state.auth?.InstagramWeb) store.state.auth.InstagramWeb.status = "ACTIVE";
           await refreshInstagramWebBackupIfChanged().catch(error => console.warn("Instagram cookie backup refresh:", error.message));
@@ -428,7 +460,8 @@ async function scanAll({ report = false } = {}) {
   } finally {
     scanRunning = false;
   }
-  return report ? `הבדיקה הסתיימה: ${newCount} פרסומים חדשים, ${errorCount} שגיאות.` : undefined;
+  const deferredNote = deferredCount ? ` ${deferredCount} חשבונות Instagram נבדקו לאחרונה ולא נסרקו שוב כדי למנוע חסימה.` : "";
+  return report ? `הבדיקה הסתיימה: ${newCount} פרסומים חדשים, ${errorCount} שגיאות.${deferredNote}` : undefined;
 }
 
 async function addSubscription(chatId, text) {

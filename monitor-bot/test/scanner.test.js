@@ -8,7 +8,8 @@ import {
   parseYouTubeFeed,
   normalizeItems,
   instagramSessionCookieExpired,
-  isLikelyAuthenticationFailure
+  isLikelyAuthenticationFailure,
+  shouldDeferInstagramScan
 } from "../src/scanner.js";
 
 test("accepts supported creator URLs", () => {
@@ -64,6 +65,15 @@ test("recognizes authentication failures without classifying timeouts as expired
   assert.equal(isLikelyAuthenticationFailure(new Error("login_required")), true);
   assert.equal(isLikelyAuthenticationFailure(new Error("HTTP 403")), true);
   assert.equal(isLikelyAuthenticationFailure(new Error("request timed out")), false);
+});
+
+test("defers only very recent Instagram scans to avoid account throttling", () => {
+  const now = Date.parse("2026-08-13T07:00:00Z");
+  const recent = { platform: "Instagram", lastCheckedAt: "2026-08-13T06:55:00Z" };
+  const old = { platform: "Instagram", lastCheckedAt: "2026-08-13T06:50:00Z" };
+  assert.equal(shouldDeferInstagramScan(recent, 10 * 60_000, now), true);
+  assert.equal(shouldDeferInstagramScan(old, 10 * 60_000, now), false);
+  assert.equal(shouldDeferInstagramScan({ ...recent, platform: "YouTube" }, 10 * 60_000, now), false);
 });
 
 test("rejects single publication URLs", () => {

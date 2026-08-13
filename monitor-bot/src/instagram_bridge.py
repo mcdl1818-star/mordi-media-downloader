@@ -186,13 +186,9 @@ def scan():
     try:
         settings = json.loads(session_file.read_text(encoding="utf-8"))
         client = Client(settings=settings)
-        client.delay_range = [1, 3]
+        client.delay_range = [2, 4]
         user_id = client.user_id_from_username(username)
         media = list(client.user_medias(user_id, amount=limit))
-        try:
-            media.extend(client.user_clips(user_id, amount=limit))
-        except Exception:
-            pass
         items = []
         seen = set()
         for entry in media:
@@ -210,12 +206,16 @@ def scan():
         except Exception:
             pass
         items.sort(key=lambda item: item.get("date", ""), reverse=True)
-        output({"status": "OK", "items": items[:limit]})
+        output({"status": "OK", "items": items[:limit], "settings": client.get_settings()})
     except Exception as error:
         name = type(error).__name__
         if name in ("LoginRequired", "ClientLoginRequired", "AuthRequired"):
             output({"status": "SESSION_EXPIRED"})
-        output({"status": "ERROR", "message": "Instagram scan failed"}, 2)
+        if name in ("PleaseWaitFewMinutes", "ClientThrottledError", "RateLimitError"):
+            output({"status": "RATE_LIMIT", "message": "Instagram temporarily rate-limited the scan"}, 2)
+        if name in ("ClientConnectionError", "ClientJSONDecodeError", "ClientProxyConnectionError", "ConnectTimeout", "ReadTimeout"):
+            output({"status": "NETWORK_ERROR", "message": "Instagram scan had a temporary network error"}, 2)
+        output({"status": "ERROR", "message": f"Instagram scan failed ({name})"}, 2)
 
 
 if __name__ == "__main__":

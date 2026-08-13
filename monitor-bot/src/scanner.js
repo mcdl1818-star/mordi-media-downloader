@@ -179,6 +179,15 @@ export function isLikelyAuthenticationFailure(error) {
     .test(String(error?.message || error || ""));
 }
 
+export function shouldDeferInstagramScan(subscription, intervalMs, now = Date.now()) {
+  if (subscription?.platform !== "Instagram") return false;
+  const lastChecked = Date.parse(subscription.lastCheckedAt || "");
+  if (!Number.isFinite(lastChecked)) return false;
+  const cooldownMs = Math.min(8 * 60_000, Math.max(2 * 60_000, Number(intervalMs || 0) * 0.75));
+  const elapsed = now - lastChecked;
+  return elapsed >= 0 && elapsed < cooldownMs;
+}
+
 async function scanYtDlp(creator, config) {
   const args = [
     "--flat-playlist", "--playlist-end", String(config.maxItems),
@@ -221,6 +230,11 @@ async function scanInstagramSession(creator, config) {
   const result = JSON.parse(raw);
   if (result.status === "SESSION_EXPIRED") throw new Error("AUTH_REQUIRED:Instagram");
   if (result.status !== "OK") throw new Error(result.message || "Instagram scan failed");
+  if (result.settings && typeof result.settings === "object") {
+    const temporary = `${config.instagramSessionPath}.${crypto.randomUUID()}.tmp`;
+    await fs.promises.writeFile(temporary, JSON.stringify(result.settings), { mode: 0o600 });
+    await fs.promises.rename(temporary, config.instagramSessionPath);
+  }
   return normalizeItems(result.items, "Instagram");
 }
 
