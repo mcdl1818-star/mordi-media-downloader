@@ -10,6 +10,7 @@ import {
   creatorUrlFromMediaUrl,
   mediaItemFromUrl,
   parseYouTubeFeed,
+  parseXSyndicationTimeline,
   normalizeItems,
   instagramCreatorFromEmbedHtml,
   instagramSessionCookieExpired,
@@ -19,6 +20,59 @@ import {
   scanCreator,
   youtubeCreatorFromOembed
 } from "../src/scanner.js";
+
+test("parses video posts from the public X embed timeline", () => {
+  const payload = {
+    props: { pageProps: { timeline: { entries: [
+      { content: { tweet: {
+        id_str: "2033674857309757502",
+        created_at: "Tue Mar 17 12:00:00 +0000 2026",
+        full_text: "New video",
+        permalink: "/XFreeze/status/2033674857309757502",
+        user: { screen_name: "XFreeze" },
+        extended_entities: { media: [{ type: "video" }] }
+      } } },
+      { content: { tweet: {
+        id_str: "2033674857309757501",
+        created_at: "Tue Mar 17 11:00:00 +0000 2026",
+        full_text: "Text only",
+        permalink: "/XFreeze/status/2033674857309757501",
+        user: { screen_name: "XFreeze" },
+        entities: { media: [] }
+      } } },
+      { content: { tweet: {
+        id_str: "2033674857309757500",
+        created_at: "Tue Mar 17 10:00:00 +0000 2026",
+        full_text: "RT @someone: video",
+        permalink: "/XFreeze/status/2033674857309757500",
+        user: { screen_name: "XFreeze" },
+        extended_entities: { media: [{ type: "animated_gif" }] }
+      } } }
+    ] } } }
+  };
+  const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(payload)}</script>`;
+  assert.deepEqual(parseXSyndicationTimeline(html, 3), [{
+    id: "X:2033674857309757502",
+    url: "https://x.com/XFreeze/status/2033674857309757502",
+    title: "New video",
+    timestamp: 1773748800,
+    platform: "X"
+  }]);
+});
+
+test("uses the public X embed before requiring an account session", async () => {
+  let genericCalls = 0;
+  const items = await scanCreator({ platform: "X", url: "https://x.com/XFreeze/" }, {
+    platformCookies: {}, cookiesPath: "", maxItems: 3
+  }, {
+    scanXSyndication: async () => [{ id: "X:1", url: "https://x.com/XFreeze/status/1", platform: "X" }],
+    scanYtDlp: async () => { genericCalls += 1; return []; },
+    scanGalleryDl: async () => { genericCalls += 1; return []; },
+    scanProfileHtml: async () => { genericCalls += 1; return []; }
+  });
+  assert.equal(items[0].id, "X:1");
+  assert.equal(genericCalls, 0);
+});
 
 test("accepts supported creator URLs", () => {
   assert.equal(validateCreatorUrl("https://www.youtube.com/@OpenAI").platform, "YouTube");

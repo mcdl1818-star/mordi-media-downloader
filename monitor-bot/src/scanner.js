@@ -566,6 +566,60 @@ function netscapeCookieHeader(file) {
     .join("; ");
 }
 
+export function parseXSyndicationTimeline(html, maxItems = 15) {
+  const marker = '<script id="__NEXT_DATA__" type="application/json">';
+  const start = String(html || "").indexOf(marker);
+  if (start < 0) throw new Error("X syndication timeline data is missing");
+  const end = String(html).indexOf("</script>", start + marker.length);
+  if (end < 0) throw new Error("X syndication timeline data is incomplete");
+  let entries;
+  try {
+    entries = JSON.parse(String(html).slice(start + marker.length, end))?.props?.pageProps?.timeline?.entries;
+  } catch {
+    throw new Error("X syndication timeline data is invalid");
+  }
+  if (!Array.isArray(entries)) throw new Error("X syndication timeline entries are missing");
+  const items = [];
+  for (const entry of entries) {
+    const tweet = entry?.content?.tweet;
+    const media = tweet?.extended_entities?.media || tweet?.entities?.media || [];
+    const hasVideo = Array.isArray(media) && media.some(item => item?.type === "video" || item?.type === "animated_gif");
+    if (!tweet?.id_str || !hasVideo || String(tweet.full_text || tweet.text || "").startsWith("RT @")) continue;
+    const permalink = String(tweet.permalink || "");
+    const pathMatch = permalink.match(/^\/?([^/]+)\/status\/(\d+)/i);
+    const screenName = tweet.user?.screen_name || pathMatch?.[1] || "i/web";
+    const id = String(tweet.id_str);
+    items.push({
+      id: `X:${id}`,
+      url: `https://x.com/${screenName}/status/${id}`,
+      title: String(tweet.full_text || tweet.text || "פרסום חדש").slice(0, 300),
+      timestamp: Math.floor((Date.parse(tweet.created_at) || 0) / 1000),
+      platform: "X"
+    });
+  }
+  return [...new Map(items.map(item => [item.id, item])).values()]
+    .sort((a, b) => b.timestamp - a.timestamp || b.id.localeCompare(a.id))
+    .slice(0, maxItems);
+}
+
+async function scanXSyndication(creator, config, fetchImpl = fetch) {
+  const username = new URL(creator.url).pathname.split("/").filter(Boolean)[0];
+  if (!/^[A-Za-z0-9_]{1,30}$/.test(username || "")) throw new Error("Invalid X profile username");
+  const cookiesPath = cookiesPathFor("X", config);
+  const cookie = ["dnt=1", netscapeCookieHeader(cookiesPath)].filter(Boolean).join("; ");
+  const response = await fetchImpl(`https://syndication.twitter.com/srv/timeline-profile/screen-name/${encodeURIComponent(username)}`, {
+    redirect: "follow",
+    signal: AbortSignal.timeout(20_000),
+    headers: {
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+      origin: "https://publish.twitter.com",
+      cookie
+    }
+  });
+  if (!response.ok) throw new Error(`X syndication HTTP ${response.status}`);
+  return parseXSyndicationTimeline(await response.text(), config.maxItems);
+}
+
 function htmlCandidates(html, creator, maxItems) {
   const patterns = {
     Instagram: /(?:https?:\\?\/\\?\/(?:www\.)?instagram\.com)?\\?\/(reel|p)\\?\/([A-Za-z0-9_-]+)/g,
@@ -621,12 +675,23 @@ export async function scanCreator(creator, config, dependencies = {}) {
   const scanYt = dependencies.scanYtDlp || scanYtDlp;
   const scanGallery = dependencies.scanGalleryDl || scanGalleryDl;
   const scanHtml = dependencies.scanProfileHtml || scanProfileHtml;
+  const scanX = dependencies.scanXSyndication || scanXSyndication;
+  let firstError;
   if (creator.platform === "YouTube") {
     try {
       const items = await scanYouTubeFeed(creator, config);
       if (items.length) return items;
     } catch {
       // Continue to yt-dlp, which also covers playlists and unusual channel URLs.
+    }
+  }
+  if (creator.platform === "X") {
+    try {
+      // X's public embed timeline is both lighter and more stable than the
+      // logged-in website. An empty media timeline is still a successful scan.
+      return await scanX(creator, config);
+    } catch (error) {
+      firstError = error;
     }
   }
   const needsSession = ["Instagram", "Facebook", "X"].includes(creator.platform);
@@ -636,7 +701,6 @@ export async function scanCreator(creator, config, dependencies = {}) {
   if (creator.platform === "Instagram" && !config.instagramSessionPath && platformCookiePath && instagramSessionCookieExpired(platformCookiePath)) {
     throw instagramAuthenticationError(["web"]);
   }
-  let firstError;
   let instagramPrivateError;
   let instagramWebAuthFailed = false;
   let instagramWebSucceeded = false;
