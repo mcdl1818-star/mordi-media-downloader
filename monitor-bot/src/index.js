@@ -867,7 +867,11 @@ async function startWebhook() {
     }
     if (request.method === "GET" && request.url === "/") {
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ ok: true, service: "Mordi Creator Monitor" }));
+      response.end(JSON.stringify({
+        ok: true,
+        service: "Mordi Creator Monitor",
+        version: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || "local"
+      }));
       return;
     }
     if (request.method === "GET" && requestUrl.pathname === scanPath) {
