@@ -36,11 +36,17 @@ import {
   instagramCookiesFromExport,
   instagramCookieFingerprint
 } from "./instagram-cookies.js";
+import {
+  createYoutubeWorkerToken,
+  verifyYoutubeWorkerToken,
+  dispatchYoutubeWorker
+} from "./youtube-worker.js";
 
 const config = readConfig();
 const telegram = new Telegram(config.token);
 const store = new Store(config.dataDir, telegram, config.allowedUserId);
 await store.load();
+store.state.youtubeJobs ||= {};
 config.platformCookies = {};
 let offset = 0;
 let scanRunning = false;
@@ -52,6 +58,19 @@ const pendingActions = new Map();
 const busyUsers = new Set();
 const ACTION_TTL_MS = 30 * 60_000;
 let lastDownloadDiagnostic = null;
+const YOUTUBE_JOB_TTL_MS = 45 * 60_000;
+
+function pruneYoutubeJobs(now = Date.now()) {
+  store.state.youtubeJobs ||= {};
+  let changed = false;
+  for (const [jobId, job] of Object.entries(store.state.youtubeJobs)) {
+    if (!Number.isFinite(job.createdAt) || now - job.createdAt > YOUTUBE_JOB_TTL_MS) {
+      delete store.state.youtubeJobs[jobId];
+      changed = true;
+    }
+  }
+  return changed;
+}
 
 function privateSessionFingerprint(value) {
   return crypto.createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
@@ -398,11 +417,71 @@ async function refreshInstagramPrivateBackupIfChanged() {
   await saveInstagramSession(JSON.parse(serialized), username);
 }
 
+async function queueYoutubeWorkerDelivery({
+  chatId,
+  item,
+  statusMessageId,
+  caption,
+  offerTracking = false
+}) {
+  if (!config.githubActionsToken || item.platform !== "YouTube") return false;
+  pruneYoutubeJobs();
+  const jobId = crypto.randomBytes(16).toString("hex");
+  store.state.youtubeJobs[jobId] = {
+    createdAt: Date.now(),
+    chatId: String(chatId),
+    statusMessageId: Number(statusMessageId) || 0,
+    item: {
+      id: String(item.id || "").slice(0, 200),
+      url: item.url,
+      title: String(item.title || "").slice(0, 300),
+      platform: "YouTube"
+    },
+    caption: String(caption || "").slice(0, 1000),
+    offerTracking: Boolean(offerTracking)
+  };
+  const callbackToken = createYoutubeWorkerToken(config.webhookSecret, jobId, Date.now(), YOUTUBE_JOB_TTL_MS);
+  await store.save();
+  try {
+    const dispatched = await dispatchYoutubeWorker(callbackToken, config);
+    if (!dispatched) throw new Error("GitHub YouTube worker is not configured");
+    await telegram.call("editMessageText", {
+      chat_id: chatId,
+      message_id: statusMessageId,
+      text: "☁️ YouTube הועבר לשרת ההורדה החלופי. הקובץ יישלח לכאן אוטומטית."
+    }).catch(() => {});
+    return true;
+  } catch (error) {
+    delete store.state.youtubeJobs[jobId];
+    await store.save().catch(console.error);
+    throw error;
+  }
+}
+
 async function deliver(item, subscription, { historical = false } = {}) {
   const caption = historical
     ? `👋 סרטון קודם לזיהוי אצל ${subscription.label}\n${item.title}\n${item.url}`
     : `🎬 פרסום חדש אצל ${subscription.label}\n${item.title}\n${item.url}`;
   if (config.sendMode === "video") {
+    if (item.platform === "YouTube" && config.githubActionsToken) {
+      const status = await telegram.sendMessage(config.allowedUserId, "☁️ מכין את סרטון YouTube בשרת החלופי...");
+      try {
+        if (await queueYoutubeWorkerDelivery({
+          chatId: config.allowedUserId,
+          item,
+          statusMessageId: status.message_id,
+          caption
+        })) return;
+      } catch (error) {
+        console.warn(`YouTube worker fallback for ${item.url}: ${error.message}`);
+        await telegram.call("editMessageText", {
+          chat_id: config.allowedUserId,
+          message_id: status.message_id,
+          text: `⚠️ שרת ההורדה החלופי לא הופעל. הקישור נשמר ונשלח כאן:\n${item.url}`
+        }).catch(() => {});
+        return;
+      }
+    }
     let file;
     try {
       file = await downloadVideo(item, config);
@@ -511,6 +590,16 @@ async function downloadRequestedMedia(chatId, mediaUrl) {
   const status = await telegram.sendMessage(chatId, `⬇️ מוריד עכשיו מ-${item.platform}...`);
   let file;
   try {
+    if (item.platform === "YouTube" && config.githubActionsToken) {
+      await queueYoutubeWorkerDelivery({
+        chatId,
+        item,
+        statusMessageId: status.message_id,
+        caption: `✅ הורד מ-YouTube\n${item.url}`,
+        offerTracking: true
+      });
+      return;
+    }
     file = await downloadVideo(item, config);
     const size = (await fs.promises.stat(file)).size;
     if (size > config.maxBytes) throw new Error("הקובץ גדול ממגבלת Telegram");
@@ -782,9 +871,12 @@ async function handleMessage(message) {
   if (text === "/start" || text === "/help") return telegram.sendMessage(chatId, help);
   if (text === "/diagnostics") {
     const value = lastDownloadDiagnostic;
+    const worker = config.githubActionsToken
+      ? `✅ עובד YouTube חלופי מחובר; ${Object.keys(store.state.youtubeJobs || {}).length} משימות ממתינות.`
+      : "❌ עובד YouTube חלופי אינו מחובר.";
     return telegram.sendMessage(chatId, value
-      ? `אבחון הורדה אחרון (${value.platform}, ${value.at}):\n${value.message}`
-      : "אין עדיין אבחון הורדה במופע השרת הנוכחי.");
+      ? `${worker}\n\nאבחון הורדה אחרון (${value.platform}, ${value.at}):\n${value.message}`
+      : `${worker}\nאין עדיין אבחון הורדה במופע השרת הנוכחי.`);
   }
   if (/^\/instagram_file(?:@\w+)?$/i.test(text)) return sendInstagramFileInstructions(chatId);
   const instagramCommand = text.match(/^\/(?:instagram|connect_instagram)(?:@\w+)?(?:\s+(.+))?$/i);
@@ -860,6 +952,7 @@ function configureBotCommands() {
       { command: "list", description: "רשימת המעקבים" },
       { command: "check", description: "בדיקה מיידית" },
       { command: "auth", description: "מצב החיבורים" },
+      { command: "diagnostics", description: "בדיקת תקינות הורדות" },
       { command: "pause", description: "השהיית המעקב" },
       { command: "resume", description: "חידוש המעקב" }
     ]
@@ -922,6 +1015,49 @@ function readJsonBody(request, limit = 256_000) {
   });
 }
 
+function readBufferBody(request, limit) {
+  return new Promise((resolve, reject) => {
+    const declared = Number(request.headers["content-length"] || 0);
+    if (declared > limit) {
+      reject(new Error("Request body is too large"));
+      return;
+    }
+    const chunks = [];
+    let size = 0;
+    let settled = false;
+    const fail = error => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    request.on("data", chunk => {
+      if (settled) return;
+      size += chunk.length;
+      if (size > limit) {
+        fail(new Error("Request body is too large"));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+    request.on("error", fail);
+  });
+}
+
+async function readFormDataBody(request, limit) {
+  const contentType = String(request.headers["content-type"] || "");
+  if (!/^(?:multipart\/form-data|application\/x-www-form-urlencoded)(?:;|$)/i.test(contentType)) {
+    throw new Error("Invalid form content type");
+  }
+  const raw = await readBufferBody(request, limit);
+  return new Response(raw, { headers: { "content-type": contentType } }).formData();
+}
+
 function sendJson(response, status, value) {
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -929,6 +1065,119 @@ function sendJson(response, status, value) {
     "x-content-type-options": "nosniff"
   });
   response.end(JSON.stringify(value));
+}
+
+function youtubeWorkerFailureText(code, url) {
+  const reason = code === "FILE_TOO_LARGE"
+    ? "הסרטון גדול מדי גם באיכות הנמוכה שמתאימה ל-Telegram."
+    : code === "YOUTUBE_AUTH"
+      ? "YouTube חסמה גם את שרת הגיבוי הפעם."
+      : "שרת הגיבוי לא הצליח להשלים את ההורדה.";
+  return `❌ ${reason}\nהקישור לא אבד:\n${url}`;
+}
+
+async function handleYoutubeWorkerCallback(request, response) {
+  if (request.method !== "POST") {
+    response.writeHead(405, { allow: "POST" });
+    response.end();
+    return;
+  }
+  let form;
+  try {
+    form = await readFormDataBody(request, config.maxBytes + 2 * 1024 * 1024);
+  } catch (error) {
+    sendJson(response, error.message.includes("large") ? 413 : 400, { ok: false, error: "INVALID_REQUEST" });
+    return;
+  }
+  let payload;
+  try {
+    payload = verifyYoutubeWorkerToken(String(form.get("token") || ""), config.webhookSecret);
+  } catch {
+    sendJson(response, 403, { ok: false, error: "INVALID_OR_EXPIRED_TOKEN" });
+    return;
+  }
+  pruneYoutubeJobs();
+  const job = store.state.youtubeJobs?.[payload.jobId];
+  if (!job || job.processing || job.chatId !== String(config.allowedUserId)) {
+    sendJson(response, 404, { ok: false, error: "JOB_NOT_FOUND" });
+    return;
+  }
+  const state = String(form.get("state") || "");
+  if (state === "claim") {
+    sendJson(response, 200, {
+      ok: true,
+      url: job.item.url,
+      kind: "video",
+      height: 480,
+      audioBitrate: 128,
+      mute: false,
+      subtitles: false
+    });
+    return;
+  }
+  if (state === "started") {
+    await telegram.call("editMessageText", {
+      chat_id: job.chatId,
+      message_id: job.statusMessageId,
+      text: "☁️ שרת YouTube החלופי התחיל להוריד את הסרטון..."
+    }).catch(() => {});
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+  if (state === "failure") {
+    delete store.state.youtubeJobs[payload.jobId];
+    await store.save().catch(console.error);
+    await telegram.call("editMessageText", {
+      chat_id: job.chatId,
+      message_id: job.statusMessageId,
+      text: youtubeWorkerFailureText(String(form.get("code") || "DOWNLOAD_FAILED"), job.item.url)
+    }).catch(() => {});
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+  if (state !== "success") {
+    sendJson(response, 400, { ok: false, error: "INVALID_STATE" });
+    return;
+  }
+  const uploaded = form.get("file");
+  if (!(uploaded instanceof Blob) || uploaded.size < 1 || uploaded.size > config.maxBytes) {
+    sendJson(response, 400, { ok: false, error: "INVALID_MEDIA" });
+    return;
+  }
+  job.processing = true;
+  await fs.promises.mkdir(config.tempDir, { recursive: true });
+  const directory = path.join(config.tempDir, `youtube-worker-${payload.jobId}`);
+  const destination = path.join(directory, "youtube.mp4");
+  try {
+    await fs.promises.mkdir(directory, { recursive: true });
+    await fs.promises.writeFile(destination, Buffer.from(await uploaded.arrayBuffer()), { mode: 0o600 });
+    await telegram.sendVideo(job.chatId, destination, job.caption || `✅ הורד מ-YouTube\n${job.item.url}`);
+    await telegram.call("editMessageText", {
+      chat_id: job.chatId,
+      message_id: job.statusMessageId,
+      text: "✅ הורדת YouTube הושלמה ונשלחה דרך השרת החלופי."
+    }).catch(() => {});
+    if (job.offerTracking) {
+      let creator = null;
+      const creatorUrl = String(form.get("creator_url") || "");
+      try {
+        creator = validateCreatorUrl(creatorUrl);
+        if (creator.platform !== "YouTube") creator = null;
+      } catch {
+        creator = null;
+      }
+      await sendTrackingChoice(job.chatId, job.item.url, creator);
+    }
+    delete store.state.youtubeJobs[payload.jobId];
+    await store.save();
+    sendJson(response, 200, { ok: true });
+  } catch (error) {
+    job.processing = false;
+    console.error("YouTube worker delivery:", error.message);
+    sendJson(response, 502, { ok: false, error: "DELIVERY_FAILED" });
+  } finally {
+    await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 async function handleInstagramSessionConnect(request, response) {
@@ -1101,6 +1350,14 @@ async function startWebhook() {
   const scanPath = createCreatorMonitorScanPath(config.token);
   const server = http.createServer((request, response) => {
     const requestUrl = new URL(request.url, config.webhookUrl);
+    if (requestUrl.pathname === scanPath && request.method === "POST") {
+      void handleYoutubeWorkerCallback(request, response).catch(error => {
+        console.error("YouTube worker callback:", error.message);
+        if (!response.headersSent) sendJson(response, 500, { ok: false, error: "WORKER_CALLBACK_FAILED" });
+        else response.end();
+      });
+      return;
+    }
     if (requestUrl.pathname === "/connect/instagram/session") {
       void handleInstagramSessionConnect(request, response).catch(error => {
         console.error("Instagram session connect:", error.message);

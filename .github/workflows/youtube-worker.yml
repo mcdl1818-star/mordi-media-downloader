@@ -1,0 +1,303 @@
+name: YouTube fallback worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Delivery mode
+        required: false
+        default: telegram
+        type: string
+      callback_token:
+        description: Opaque creator-monitor callback token
+        required: false
+        default: ""
+        type: string
+      url:
+        description: YouTube URL for the legacy downloader bot
+        required: false
+        default: ""
+        type: string
+      kind:
+        required: false
+        default: video
+        type: string
+      height:
+        required: false
+        default: "480"
+        type: string
+      audio_bitrate:
+        required: false
+        default: "128"
+        type: string
+      mute:
+        required: false
+        default: "false"
+        type: string
+      subtitles:
+        required: false
+        default: "false"
+        type: string
+      chat_id:
+        required: false
+        default: ""
+        type: string
+      reply_to:
+        required: false
+        default: ""
+        type: string
+      status_message_id:
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DELIVERY_MODE: ${{ inputs.mode }}
+      CALLBACK_TOKEN: ${{ inputs.callback_token }}
+      SOURCE_URL: ${{ inputs.url }}
+      MEDIA_KIND: ${{ inputs.kind }}
+      MAX_HEIGHT: ${{ inputs.height }}
+      AUDIO_BITRATE: ${{ inputs.audio_bitrate }}
+      MUTE_VIDEO: ${{ inputs.mute }}
+      EMBED_SUBTITLES: ${{ inputs.subtitles }}
+      CHAT_ID: ${{ inputs.chat_id }}
+      REPLY_TO: ${{ inputs.reply_to }}
+      STATUS_MESSAGE_ID: ${{ inputs.status_message_id }}
+      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
+      CREATOR_MONITOR_SCAN_URL: ${{ secrets.CREATOR_MONITOR_SCAN_URL }}
+
+    steps:
+      - name: Claim creator-monitor job
+        if: inputs.mode == 'creator_monitor'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${CALLBACK_TOKEN}"
+          test -n "${CREATOR_MONITOR_SCAN_URL}"
+          curl --fail --silent --show-error --retry 3 \
+            -X POST "${CREATOR_MONITOR_SCAN_URL}" \
+            -F "state=claim" \
+            -F "token=${CALLBACK_TOKEN}" \
+            -o /tmp/creator-monitor-job.json
+          source_url="$(jq -er '.url' /tmp/creator-monitor-job.json)"
+          media_kind="$(jq -er '.kind' /tmp/creator-monitor-job.json)"
+          max_height="$(jq -er '.height' /tmp/creator-monitor-job.json)"
+          audio_bitrate="$(jq -er '.audioBitrate' /tmp/creator-monitor-job.json)"
+          printf 'SOURCE_URL=%s\n' "${source_url}" >> "${GITHUB_ENV}"
+          printf 'MEDIA_KIND=%s\n' "${media_kind}" >> "${GITHUB_ENV}"
+          printf 'MAX_HEIGHT=%s\n' "${max_height}" >> "${GITHUB_ENV}"
+          printf 'AUDIO_BITRATE=%s\n' "${audio_bitrate}" >> "${GITHUB_ENV}"
+          printf 'MUTE_VIDEO=false\nEMBED_SUBTITLES=false\n' >> "${GITHUB_ENV}"
+
+      - name: Validate legacy Telegram job
+        if: inputs.mode != 'creator_monitor'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${SOURCE_URL}"
+          test -n "${BOT_TOKEN}"
+          test -n "${CHAT_ID}"
+
+      - name: Set up JavaScript runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install media tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo curl --fail --silent --show-error --location \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux \
+            --output /usr/local/bin/yt-dlp
+          sudo chmod 755 /usr/local/bin/yt-dlp
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+
+      - name: Restore optional YouTube authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${YOUTUBE_COOKIES_B64}" ]]; then
+            printf '%s' "${YOUTUBE_COOKIES_B64}" | base64 --decode > /tmp/youtube-cookies.txt
+            chmod 600 /tmp/youtube-cookies.txt
+          else
+            : > /tmp/youtube-cookies.txt
+          fi
+
+      - name: Notify processing started
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${DELIVERY_MODE}" == "creator_monitor" ]]; then
+            curl --fail --silent --show-error --retry 3 \
+              -X POST "${CREATOR_MONITOR_SCAN_URL}" \
+              -F "state=started" \
+              -F "token=${CALLBACK_TOKEN}"
+          else
+            curl --fail --silent --show-error \
+              -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "message_id=${STATUS_MESSAGE_ID}" \
+              --data-urlencode "text=☁️ שרת YouTube החלופי התחיל לעבד את הקישור..."
+          fi
+
+      - name: Download and process
+        id: media
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec 2> >(tee -a /tmp/youtube-worker-error.log >&2)
+          mkdir -p output
+          common=(
+            --no-playlist
+            --windows-filenames
+            --trim-filenames 100
+            --concurrent-fragments 8
+            --retries 4
+            --fragment-retries 6
+            --retry-sleep "http:exp=1:10"
+            --max-filesize 48M
+            --js-runtimes node
+            --remote-components ejs:github
+            --print-to-file after_move:filepath /tmp/final-path.txt
+            --print-to-file "%(channel_url)s" /tmp/creator-url.txt
+            -o "output/%(title).80B [%(id)s].%(ext)s"
+          )
+
+          download_once() {
+            local quality="$1"
+            shift
+            rm -rf output/*
+            rm -f /tmp/final-path.txt /tmp/creator-url.txt
+            if [[ "${MEDIA_KIND}" == "audio" ]]; then
+              yt-dlp "${common[@]}" "$@" \
+                -f "ba/b" -x --audio-format mp3 --audio-quality "${AUDIO_BITRATE}K" \
+                --embed-metadata -- "${SOURCE_URL}"
+            else
+              local -a extra=()
+              if [[ "${EMBED_SUBTITLES}" == "true" ]]; then
+                extra+=(--write-subs --write-auto-subs --sub-langs "he.*,en.*" --sub-format "vtt/srt/best" --embed-subs)
+              fi
+              yt-dlp "${common[@]}" "$@" "${extra[@]}" \
+                -f "b[ext=mp4][height<=${quality}]/bv*[height<=${quality}]+ba/b[height<=${quality}]/b" \
+                --merge-output-format mp4 -- "${SOURCE_URL}"
+            fi
+          }
+
+          download_public() {
+            local client quality
+            for client in web_embedded mweb android_vr; do
+              for quality in "${MAX_HEIGHT}" 360 240; do
+                if download_once "${quality}" --extractor-args "youtube:player_client=${client}"; then
+                  return 0
+                fi
+              done
+            done
+            return 1
+          }
+
+          if ! download_public; then
+            if [[ ! -s /tmp/youtube-cookies.txt ]]; then
+              exit 1
+            fi
+            downloaded=false
+            for quality in "${MAX_HEIGHT}" 360 240; do
+              if download_once "${quality}" --cookies /tmp/youtube-cookies.txt; then
+                downloaded=true
+                break
+              fi
+            done
+            [[ "${downloaded}" == "true" ]]
+          fi
+
+          media_file="$(tail -n 1 /tmp/final-path.txt 2>/dev/null || true)"
+          if [[ ! -f "${media_file}" ]]; then
+            media_file="$(find output -type f ! -name '*.part' | head -n 1)"
+          fi
+          test -f "${media_file}"
+
+          if [[ "${MUTE_VIDEO}" == "true" ]]; then
+            ffmpeg -y -i "${media_file}" -map 0:v:0 -c:v copy -an -movflags +faststart output/muted.mp4
+            rm -f "${media_file}"
+            media_file="output/muted.mp4"
+          fi
+
+          size="$(stat -c %s "${media_file}")"
+          if (( size > 50331648 )); then
+            echo "Final file exceeds Telegram's configured 48MB limit" >&2
+            exit 1
+          fi
+          echo "file=${media_file}" >> "${GITHUB_OUTPUT}"
+
+      - name: Send result
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${DELIVERY_MODE}" == "creator_monitor" ]]; then
+            creator_url="$(tail -n 1 /tmp/creator-url.txt 2>/dev/null || true)"
+            args=(
+              --fail --silent --show-error --retry 3
+              -X POST "${CREATOR_MONITOR_SCAN_URL}"
+              -F "state=success"
+              -F "token=${CALLBACK_TOKEN}"
+              -F "file=@${{ steps.media.outputs.file }};type=video/mp4"
+            )
+            if [[ "${creator_url}" == https://www.youtube.com/* ]]; then
+              args+=(-F "creator_url=${creator_url}")
+            fi
+            curl "${args[@]}"
+          else
+            method="sendVideo"
+            field="video"
+            if [[ "${MEDIA_KIND}" == "audio" ]]; then
+              method="sendAudio"
+              field="audio"
+            fi
+            reply_json="{\"message_id\":${REPLY_TO},\"allow_sending_without_reply\":true}"
+            curl --fail --silent --show-error \
+              -X POST "https://api.telegram.org/bot${BOT_TOKEN}/${method}" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "${field}=@${{ steps.media.outputs.file }}" \
+              -F "caption=YouTube • הושלם בשרת החלופי" \
+              -F "reply_parameters=${reply_json}"
+            curl --fail --silent --show-error \
+              -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "message_id=${STATUS_MESSAGE_ID}" \
+              --data-urlencode "text=✅ הורדת YouTube הושלמה ונשלחה דרך השרת החלופי."
+          fi
+
+      - name: Report failure
+        if: failure()
+        shell: bash
+        run: |
+          code="DOWNLOAD_FAILED"
+          if grep -Eqi "sign in|not a bot|cookies are no longer valid|HTTP Error 429" /tmp/youtube-worker-error.log 2>/dev/null; then
+            code="YOUTUBE_AUTH"
+          elif grep -Eqi "max-filesize|exceeds Telegram|File is larger" /tmp/youtube-worker-error.log 2>/dev/null; then
+            code="FILE_TOO_LARGE"
+          fi
+          if [[ "${DELIVERY_MODE}" == "creator_monitor" && -n "${CREATOR_MONITOR_SCAN_URL}" && -n "${CALLBACK_TOKEN}" ]]; then
+            curl --silent --show-error --retry 3 \
+              -X POST "${CREATOR_MONITOR_SCAN_URL}" \
+              -F "state=failure" \
+              -F "token=${CALLBACK_TOKEN}" \
+              -F "code=${code}" || true
+          elif [[ -n "${BOT_TOKEN}" && -n "${CHAT_ID}" ]]; then
+            curl --silent --show-error \
+              -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "message_id=${STATUS_MESSAGE_ID}" \
+              --data-urlencode "text=❌ שרת YouTube החלופי לא הצליח להוריד את הסרטון." || true
+          fi
