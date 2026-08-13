@@ -424,7 +424,7 @@ async function queueYoutubeWorkerDelivery({
   caption,
   offerTracking = false
 }) {
-  if (!config.githubActionsToken || item.platform !== "YouTube") return false;
+  if (item.platform !== "YouTube" || !config.webhookUrl) return false;
   pruneYoutubeJobs();
   const jobId = crypto.randomBytes(16).toString("hex");
   store.state.youtubeJobs[jobId] = {
@@ -444,11 +444,12 @@ async function queueYoutubeWorkerDelivery({
   await store.save();
   try {
     const dispatched = await dispatchYoutubeWorker(callbackToken, config);
-    if (!dispatched) throw new Error("GitHub YouTube worker is not configured");
     await telegram.call("editMessageText", {
       chat_id: chatId,
       message_id: statusMessageId,
-      text: "☁️ YouTube הועבר לשרת ההורדה החלופי. הקובץ יישלח לכאן אוטומטית."
+      text: dispatched
+        ? "☁️ YouTube הועבר לשרת ההורדה החלופי. הקובץ יישלח לכאן אוטומטית."
+        : "☁️ YouTube נוסף לתור המאובטח. שרת ההורדה החלופי יאסוף אותו אוטומטית בתוך עד 5 דקות."
     }).catch(() => {});
     return true;
   } catch (error) {
@@ -463,7 +464,7 @@ async function deliver(item, subscription, { historical = false } = {}) {
     ? `👋 סרטון קודם לזיהוי אצל ${subscription.label}\n${item.title}\n${item.url}`
     : `🎬 פרסום חדש אצל ${subscription.label}\n${item.title}\n${item.url}`;
   if (config.sendMode === "video") {
-    if (item.platform === "YouTube" && config.githubActionsToken) {
+    if (item.platform === "YouTube" && config.webhookUrl) {
       const status = await telegram.sendMessage(config.allowedUserId, "☁️ מכין את סרטון YouTube בשרת החלופי...");
       try {
         if (await queueYoutubeWorkerDelivery({
@@ -590,7 +591,7 @@ async function downloadRequestedMedia(chatId, mediaUrl) {
   const status = await telegram.sendMessage(chatId, `⬇️ מוריד עכשיו מ-${item.platform}...`);
   let file;
   try {
-    if (item.platform === "YouTube" && config.githubActionsToken) {
+    if (item.platform === "YouTube" && config.webhookUrl) {
       await queueYoutubeWorkerDelivery({
         chatId,
         item,
@@ -871,9 +872,9 @@ async function handleMessage(message) {
   if (text === "/start" || text === "/help") return telegram.sendMessage(chatId, help);
   if (text === "/diagnostics") {
     const value = lastDownloadDiagnostic;
-    const worker = config.githubActionsToken
-      ? `✅ עובד YouTube חלופי מחובר; ${Object.keys(store.state.youtubeJobs || {}).length} משימות ממתינות.`
-      : "❌ עובד YouTube חלופי אינו מחובר.";
+    const worker = config.webhookUrl
+      ? `✅ עובד YouTube חלופי אוטומטי פעיל; ${Object.keys(store.state.youtubeJobs || {}).length} משימות ממתינות.${config.githubActionsToken ? " הפעלה מיידית מחוברת." : " איסוף עד 5 דקות."}`
+      : "❌ עובד YouTube חלופי זמין רק בפריסת הענן.";
     return telegram.sendMessage(chatId, value
       ? `${worker}\n\nאבחון הורדה אחרון (${value.platform}, ${value.at}):\n${value.message}`
       : `${worker}\nאין עדיין אבחון הורדה במופע השרת הנוכחי.`);
@@ -1089,6 +1090,32 @@ async function handleYoutubeWorkerCallback(request, response) {
     sendJson(response, error.message.includes("large") ? 413 : 400, { ok: false, error: "INVALID_REQUEST" });
     return;
   }
+  const state = String(form.get("state") || "");
+  if (state === "claim_next") {
+    pruneYoutubeJobs();
+    const next = Object.entries(store.state.youtubeJobs || {})
+      .filter(([, job]) => !job.processing && job.chatId === String(config.allowedUserId))
+      .sort((left, right) => left[1].createdAt - right[1].createdAt)[0];
+    if (!next) {
+      sendJson(response, 200, { ok: true, job: null });
+      return;
+    }
+    const [jobId, job] = next;
+    const callbackToken = createYoutubeWorkerToken(config.webhookSecret, jobId, Date.now(), YOUTUBE_JOB_TTL_MS);
+    sendJson(response, 200, {
+      ok: true,
+      job: {
+        token: callbackToken,
+        url: job.item.url,
+        kind: "video",
+        height: 480,
+        audioBitrate: 128,
+        mute: false,
+        subtitles: false
+      }
+    });
+    return;
+  }
   let payload;
   try {
     payload = verifyYoutubeWorkerToken(String(form.get("token") || ""), config.webhookSecret);
@@ -1102,7 +1129,6 @@ async function handleYoutubeWorkerCallback(request, response) {
     sendJson(response, 404, { ok: false, error: "JOB_NOT_FOUND" });
     return;
   }
-  const state = String(form.get("state") || "");
   if (state === "claim") {
     sendJson(response, 200, {
       ok: true,
