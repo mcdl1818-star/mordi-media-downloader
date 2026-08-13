@@ -217,7 +217,7 @@ def scan():
         name = type(error).__name__
         if name in ("LoginRequired", "ClientLoginRequired", "AuthRequired"):
             output({"status": "SESSION_EXPIRED"})
-        if name in ("PleaseWaitFewMinutes", "ClientThrottledError", "RateLimitError"):
+        if name in ("RetryError", "PleaseWaitFewMinutes", "ClientThrottledError", "RateLimitError"):
             output({"status": "RATE_LIMIT", "message": "Instagram temporarily rate-limited the scan"}, 2)
         if name in ("ClientConnectionError", "ClientJSONDecodeError", "ClientProxyConnectionError", "ConnectTimeout", "ReadTimeout"):
             output({"status": "NETWORK_ERROR", "message": "Instagram scan had a temporary network error"}, 2)

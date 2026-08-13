@@ -440,6 +440,13 @@ async function scanAll({ report = false } = {}) {
         subscription.lastCheckedAt = new Date().toISOString();
         subscription.lastError = "";
       } catch (error) {
+        if (String(error.message).startsWith("DEFERRED:Instagram:")) {
+          deferredCount += 1;
+          subscription.lastCheckedAt = new Date().toISOString();
+          subscription.lastError = String(error.message).slice(0, 300);
+          await store.save();
+          continue;
+        }
         errorCount += 1;
         const previousError = subscription.lastError;
         subscription.lastError = String(error.message).slice(0, 300);

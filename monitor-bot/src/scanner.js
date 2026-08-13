@@ -229,6 +229,9 @@ async function scanInstagramSession(creator, config) {
   });
   const result = JSON.parse(raw);
   if (result.status === "SESSION_EXPIRED") throw new Error("AUTH_REQUIRED:Instagram");
+  if (result.status === "RATE_LIMIT" || result.status === "NETWORK_ERROR") {
+    throw new Error(`DEFERRED:Instagram:${result.status}`);
+  }
   if (result.status !== "OK") throw new Error(result.message || "Instagram scan failed");
   if (result.settings && typeof result.settings === "object") {
     const temporary = `${config.instagramSessionPath}.${crypto.randomUUID()}.tmp`;
@@ -385,6 +388,7 @@ export async function scanCreator(creator, config) {
       const items = await scanInstagramSession(creator, config);
       if (items.length) return items;
     } catch (error) {
+      if (String(error.message).startsWith("DEFERRED:Instagram:")) throw error;
       if (!platformCookiePath) throw error;
       firstError = error;
     }

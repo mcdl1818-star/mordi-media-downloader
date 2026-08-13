@@ -76,6 +76,10 @@ test("defers only very recent Instagram scans to avoid account throttling", () =
   assert.equal(shouldDeferInstagramScan({ ...recent, platform: "YouTube" }, 10 * 60_000, now), false);
 });
 
+test("recognizes temporary Instagram deferrals as non-authentication failures", () => {
+  assert.equal(isLikelyAuthenticationFailure(new Error("DEFERRED:Instagram:RATE_LIMIT")), false);
+});
+
 test("rejects single publication URLs", () => {
   assert.throws(() => validateCreatorUrl("https://x.com/OpenAI/status/123"), /פרסום בודד/);
   assert.throws(() => validateCreatorUrl("https://www.instagram.com/reel/abc/"), /פרסום בודד/);
