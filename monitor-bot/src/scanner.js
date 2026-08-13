@@ -13,6 +13,7 @@ const PLATFORM_RULES = [
 
 const EXTRACTOR_ARGS = [
   "--js-runtimes", "node",
+  "--remote-components", "ejs:github",
   "--extractor-args", "youtubepot-bgutilscript:server_home=/opt/bgutil/server",
   "--extractor-args", "twitter:api=syndication"
 ];
@@ -617,17 +618,26 @@ export async function downloadVideo(item, config) {
     await fs.promises.writeFile(destination, Buffer.from(await response.arrayBuffer()));
     return destination;
   }
-  try {
-    const clients = item.platform === "YouTube" ? YOUTUBE_CLIENTS : [""];
-    let completed = false;
-    let lastError;
-    for (const client of clients) {
+  const clients = item.platform === "YouTube" ? YOUTUBE_CLIENTS : [""];
+  const formats = item.platform === "YouTube"
+    ? [
+        "b[ext=mp4][height<=480]/bv*[height<=480]+ba/b[height<=480]/b",
+        "b[ext=mp4][height<=360]/bv*[height<=360]+ba/b[height<=360]/b",
+        "b[ext=mp4][height<=240]/bv*[height<=240]+ba/b[height<=240]/b"
+      ]
+    : ["bv*[height<=720]+ba/b[height<=720]/b"];
+  let lastError;
+  for (const client of clients) {
+    for (const format of formats) {
       try {
+        for (const name of await fs.promises.readdir(directory)) {
+          await fs.promises.rm(path.join(directory, name), { recursive: true, force: true });
+        }
         const args = [
           "--no-playlist",
           ...extractorArgs(item.url, client),
           "--ffmpeg-location", config.ffmpegPath,
-          "-f", "bv*[height<=720]+ba/b[height<=720]/b",
+          "-f", format,
           "--merge-output-format", "mp4",
           "-o", output
         ];
@@ -635,22 +645,29 @@ export async function downloadVideo(item, config) {
         if (cookiesPath) args.push("--cookies", cookiesPath);
         args.push("--", item.url);
         await run(config.ytDlpPath, args, 10 * 60_000);
-        completed = true;
-        break;
+        const files = (await fs.promises.readdir(directory))
+          .filter(name => !/\.(part|ytdl)$/.test(name))
+          .map(name => path.join(directory, name));
+        if (!files.length) throw new Error("yt-dlp הסתיים ללא קובץ מדיה");
+        const sized = await Promise.all(files.map(async file => ({ file, size: (await fs.promises.stat(file)).size })));
+        sized.sort((left, right) => right.size - left.size);
+        if (sized[0].size > config.maxBytes) {
+          throw new Error(`הקובץ גדול ממגבלת Telegram גם באיכות ${format.match(/height<=([0-9]+)/)?.[1] || "נמוכה"}p`);
+        }
+        return sized[0].file;
       } catch (error) {
         lastError = error;
       }
     }
-    if (!completed) throw lastError;
-  } catch (error) {
-    if (item.platform !== "Instagram") throw error;
-    await downloadInstagramEmbed(item.url, directory);
   }
-  const files = (await fs.promises.readdir(directory))
-    .filter(name => !/\.(part|ytdl)$/.test(name))
-    .map(name => path.join(directory, name));
-  if (!files.length) throw new Error("הקובץ לא הורד");
-  return files[0];
+  if (item.platform === "Instagram") {
+    await downloadInstagramEmbed(item.url, directory);
+    const fallback = (await fs.promises.readdir(directory))
+      .filter(name => !/\.(part|ytdl)$/.test(name))
+      .map(name => path.join(directory, name));
+    if (fallback.length) return fallback[0];
+  }
+  throw lastError || new Error("הקובץ לא הורד");
 }
 
 function decodeInstagramJsonString(value) {
