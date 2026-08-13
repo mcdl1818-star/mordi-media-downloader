@@ -1,6 +1,8 @@
 name: YouTube fallback worker
 
 on:
+  schedule:
+    - cron: "3-59/5 * * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -59,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      DELIVERY_MODE: ${{ inputs.mode }}
+      DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'creator_monitor' || inputs.mode }}
       CALLBACK_TOKEN: ${{ inputs.callback_token }}
       SOURCE_URL: ${{ inputs.url }}
       MEDIA_KIND: ${{ inputs.kind }}
@@ -76,21 +78,39 @@ jobs:
 
     steps:
       - name: Claim creator-monitor job
-        if: inputs.mode == 'creator_monitor'
+        if: inputs.mode == 'creator_monitor' || github.event_name == 'schedule'
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${CALLBACK_TOKEN}"
           test -n "${CREATOR_MONITOR_SCAN_URL}"
-          curl --fail --silent --show-error --retry 3 \
-            -X POST "${CREATOR_MONITOR_SCAN_URL}" \
-            -F "state=claim" \
-            -F "token=${CALLBACK_TOKEN}" \
-            -o /tmp/creator-monitor-job.json
-          source_url="$(jq -er '.url' /tmp/creator-monitor-job.json)"
-          media_kind="$(jq -er '.kind' /tmp/creator-monitor-job.json)"
-          max_height="$(jq -er '.height' /tmp/creator-monitor-job.json)"
-          audio_bitrate="$(jq -er '.audioBitrate' /tmp/creator-monitor-job.json)"
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            curl --fail --silent --show-error --retry 3 \
+              -X POST "${CREATOR_MONITOR_SCAN_URL}" \
+              -F "state=claim_next" \
+              -o /tmp/creator-monitor-job.json
+            if [[ "$(jq -r '.job == null' /tmp/creator-monitor-job.json)" == "true" ]]; then
+              printf 'HAS_JOB=false\n' >> "${GITHUB_ENV}"
+              exit 0
+            fi
+            callback_token="$(jq -er '.job.token' /tmp/creator-monitor-job.json)"
+            source_url="$(jq -er '.job.url' /tmp/creator-monitor-job.json)"
+            media_kind="$(jq -er '.job.kind' /tmp/creator-monitor-job.json)"
+            max_height="$(jq -er '.job.height' /tmp/creator-monitor-job.json)"
+            audio_bitrate="$(jq -er '.job.audioBitrate' /tmp/creator-monitor-job.json)"
+            printf 'CALLBACK_TOKEN=%s\n' "${callback_token}" >> "${GITHUB_ENV}"
+          else
+            test -n "${CALLBACK_TOKEN}"
+            curl --fail --silent --show-error --retry 3 \
+              -X POST "${CREATOR_MONITOR_SCAN_URL}" \
+              -F "state=claim" \
+              -F "token=${CALLBACK_TOKEN}" \
+              -o /tmp/creator-monitor-job.json
+            source_url="$(jq -er '.url' /tmp/creator-monitor-job.json)"
+            media_kind="$(jq -er '.kind' /tmp/creator-monitor-job.json)"
+            max_height="$(jq -er '.height' /tmp/creator-monitor-job.json)"
+            audio_bitrate="$(jq -er '.audioBitrate' /tmp/creator-monitor-job.json)"
+          fi
+          printf 'HAS_JOB=true\n' >> "${GITHUB_ENV}"
           printf 'SOURCE_URL=%s\n' "${source_url}" >> "${GITHUB_ENV}"
           printf 'MEDIA_KIND=%s\n' "${media_kind}" >> "${GITHUB_ENV}"
           printf 'MAX_HEIGHT=%s\n' "${max_height}" >> "${GITHUB_ENV}"
@@ -98,7 +118,7 @@ jobs:
           printf 'MUTE_VIDEO=false\nEMBED_SUBTITLES=false\n' >> "${GITHUB_ENV}"
 
       - name: Validate legacy Telegram job
-        if: inputs.mode != 'creator_monitor'
+        if: inputs.mode != 'creator_monitor' && github.event_name != 'schedule'
         shell: bash
         run: |
           set -euo pipefail
@@ -107,11 +127,13 @@ jobs:
           test -n "${CHAT_ID}"
 
       - name: Set up JavaScript runtime
+        if: env.HAS_JOB != 'false'
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
       - name: Install media tools
+        if: env.HAS_JOB != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -125,6 +147,7 @@ jobs:
           fi
 
       - name: Restore optional YouTube authentication
+        if: env.HAS_JOB != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -136,6 +159,7 @@ jobs:
           fi
 
       - name: Notify processing started
+        if: env.HAS_JOB != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -153,6 +177,7 @@ jobs:
           fi
 
       - name: Download and process
+        if: env.HAS_JOB != 'false'
         id: media
         shell: bash
         run: |
@@ -241,6 +266,7 @@ jobs:
           echo "file=${media_file}" >> "${GITHUB_OUTPUT}"
 
       - name: Send result
+        if: env.HAS_JOB != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -279,7 +305,7 @@ jobs:
           fi
 
       - name: Report failure
-        if: failure()
+        if: failure() && env.HAS_JOB != 'false'
         shell: bash
         run: |
           code="DOWNLOAD_FAILED"
