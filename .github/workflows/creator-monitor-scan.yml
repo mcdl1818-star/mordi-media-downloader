@@ -10,7 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Wake service and start scan
+        env:
+          CREATOR_MONITOR_SCAN_URL: ${{ secrets.CREATOR_MONITOR_SCAN_URL }}
         run: |
+          test -n "$CREATOR_MONITOR_SCAN_URL"
           curl --fail --silent --show-error \
             --retry 4 --retry-delay 20 --max-time 180 \
-            https://mordi-creator-monitor.onrender.com/scan
+            "$CREATOR_MONITOR_SCAN_URL"
