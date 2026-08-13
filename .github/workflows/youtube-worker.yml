@@ -132,6 +132,10 @@ jobs:
           test -n "${BOT_TOKEN}"
           test -n "${CHAT_ID}"
 
+      - name: Check out fallback source
+        if: env.HAS_JOB != 'false'
+        uses: actions/checkout@v4
+
       - name: Set up JavaScript runtime
         if: env.HAS_JOB != 'false'
         uses: actions/setup-node@v4
@@ -151,6 +155,9 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y ffmpeg
           fi
+          mkdir -p /tmp/innertube
+          npm install --prefix /tmp/innertube --no-audit --no-fund youtubei.js@17.0.1
+          cp .github/scripts/youtube-innertube-download.mjs /tmp/innertube/download.mjs
 
       - name: Restore optional YouTube authentication
         if: env.HAS_JOB != 'false'
@@ -238,18 +245,21 @@ jobs:
             return 1
           }
 
-          if ! download_public; then
-            if [[ ! -s /tmp/youtube-cookies.txt ]]; then
-              exit 1
-            fi
-            downloaded=false
+          downloaded=false
+          if download_public; then
+            downloaded=true
+          elif [[ -s /tmp/youtube-cookies.txt ]]; then
             for quality in "${MAX_HEIGHT}" 360 240; do
               if download_once "${quality}" --cookies /tmp/youtube-cookies.txt; then
                 downloaded=true
                 break
               fi
             done
-            [[ "${downloaded}" == "true" ]]
+          fi
+          if [[ "${downloaded}" != "true" ]]; then
+            rm -rf output/*
+            rm -f /tmp/final-path.txt /tmp/creator-url.txt
+            node /tmp/innertube/download.mjs
           fi
 
           media_file="$(tail -n 1 /tmp/final-path.txt 2>/dev/null || true)"
