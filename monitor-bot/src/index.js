@@ -597,25 +597,6 @@ async function deliver(item, subscription, { historical = false } = {}) {
     ? `👋 סרטון קודם לזיהוי אצל ${subscription.label}\n${item.title}\n${item.url}`
     : `🎬 פרסום חדש אצל ${subscription.label}\n${item.title}\n${item.url}`;
   if (config.sendMode === "video") {
-    if (item.platform === "YouTube" && config.webhookUrl) {
-      const status = await telegram.sendMessage(config.allowedUserId, "☁️ מכין את סרטון YouTube בשרת החלופי...");
-      try {
-        if (await queueYoutubeWorkerDelivery({
-          chatId: config.allowedUserId,
-          item,
-          statusMessageId: status.message_id,
-          caption
-        })) return;
-      } catch (error) {
-        console.warn(`YouTube worker fallback for ${item.url}: ${error.message}`);
-        await telegram.call("editMessageText", {
-          chat_id: config.allowedUserId,
-          message_id: status.message_id,
-          text: `⚠️ שרת ההורדה החלופי לא הופעל. הקישור נשמר ונשלח כאן:\n${item.url}`
-        }).catch(() => {});
-        return;
-      }
-    }
     let file;
     try {
       file = await downloadVideo(item, config);
@@ -628,6 +609,19 @@ async function deliver(item, subscription, { historical = false } = {}) {
       return;
     } catch (error) {
       console.warn(`Video delivery fallback for ${item.url}: ${error.message}`);
+      if (item.platform === "YouTube" && config.webhookUrl) {
+        const status = await telegram.sendMessage(config.allowedUserId, "☁️ מנסה את עובד YouTube החלופי...");
+        try {
+          if (await queueYoutubeWorkerDelivery({
+            chatId: config.allowedUserId,
+            item,
+            statusMessageId: status.message_id,
+            caption
+          })) return;
+        } catch (workerError) {
+          console.warn(`YouTube worker fallback for ${item.url}: ${workerError.message}`);
+        }
+      }
     } finally {
       if (file) await cleanupVideo(file).catch(console.error);
     }
@@ -731,16 +725,6 @@ async function downloadRequestedMedia(chatId, mediaUrl) {
   const status = await telegram.sendMessage(chatId, `⬇️ מוריד עכשיו מ-${item.platform}...`);
   let file;
   try {
-    if (item.platform === "YouTube" && config.webhookUrl) {
-      await queueYoutubeWorkerDelivery({
-        chatId,
-        item,
-        statusMessageId: status.message_id,
-        caption: `✅ הורד מ-YouTube\n${item.url}`,
-        offerTracking: true
-      });
-      return;
-    }
     file = await downloadVideo(item, config);
     const size = (await fs.promises.stat(file)).size;
     if (size > config.maxBytes) throw new Error("הקובץ גדול ממגבלת Telegram");
@@ -755,6 +739,20 @@ async function downloadRequestedMedia(chatId, mediaUrl) {
     const creator = await resolveCreatorFromMediaUrl(mediaUrl, config);
     await sendTrackingChoice(chatId, mediaUrl, creator);
   } catch (error) {
+    if (item.platform === "YouTube" && config.webhookUrl) {
+      try {
+        await queueYoutubeWorkerDelivery({
+          chatId,
+          item,
+          statusMessageId: status.message_id,
+          caption: `✅ הורד מ-YouTube\n${item.url}`,
+          offerTracking: true
+        });
+        return;
+      } catch (workerError) {
+        console.warn(`YouTube worker fallback for ${item.url}: ${workerError.message}`);
+      }
+    }
     lastDownloadDiagnostic = {
       at: new Date().toISOString(),
       platform: item.platform,

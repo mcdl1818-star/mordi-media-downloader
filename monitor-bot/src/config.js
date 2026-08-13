@@ -45,6 +45,7 @@ export function readConfig() {
     githubActionsToken: process.env.GITHUB_ACTIONS_TOKEN?.trim() || "",
     githubActionsRepo: process.env.GITHUB_ACTIONS_REPO?.trim() || "mcdl1818-star/mordi-media-downloader",
     githubActionsWorkflow: process.env.GITHUB_ACTIONS_WORKFLOW?.trim() || "youtube-worker.yml",
+    cobaltApiUrls: (process.env.COBALT_API_URLS || "").split(/[\s,]+/).filter(Boolean),
     sendMode: process.env.SEND_MODE?.trim().toLowerCase() === "link" ? "link" : "video",
     maxBytes: (Number(process.env.MAX_FILE_SIZE_MB) || 49) * 1024 * 1024,
     dataDir: path.resolve(process.env.DATA_DIR?.trim() || "data"),

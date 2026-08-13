@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { downloadCobaltVideo } from "./cobalt.js";
 
 const PLATFORM_RULES = [
   ["YouTube", /(^|\.)youtube\.com$|^youtu\.be$/],
@@ -638,6 +639,14 @@ export async function downloadVideo(item, config) {
     const destination = path.join(directory, `${item.id.replace(/[^A-Za-z0-9_-]/g, "_")}.${extension}`);
     await fs.promises.writeFile(destination, Buffer.from(await response.arrayBuffer()));
     return destination;
+  }
+  if (["YouTube", "TikTok", "Facebook", "X"].includes(item.platform)) {
+    try {
+      return await downloadCobaltVideo(item, config);
+    } catch {
+      // Keep the local extractors as an independent fallback when the public
+      // tunnel is unavailable or rate limited.
+    }
   }
   const clients = item.platform === "YouTube" ? YOUTUBE_CLIENTS : [""];
   const formats = item.platform === "YouTube"
