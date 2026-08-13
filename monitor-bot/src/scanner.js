@@ -13,8 +13,18 @@ const PLATFORM_RULES = [
 
 const EXTRACTOR_ARGS = [
   "--js-runtimes", "node",
+  "--extractor-args", "youtubepot-bgutilscript:server_home=/opt/bgutil/server",
   "--extractor-args", "twitter:api=syndication"
 ];
+
+const YOUTUBE_CLIENTS = ["mweb", "web_embedded", "android_vr"];
+
+function extractorArgs(url, youtubeClient = "") {
+  const args = [...EXTRACTOR_ARGS];
+  const isYouTube = /(^|\.)youtube\.com$|^youtu\.be$/i.test(new URL(url).hostname);
+  if (isYouTube && youtubeClient) args.push("--extractor-args", `youtube:player_client=${youtubeClient}`);
+  return args;
+}
 
 function supportedUrl(input) {
   let url;
@@ -90,7 +100,7 @@ export function validateCreatorUrl(input) {
   return { url: classified.url, platform: classified.platform };
 }
 
-function run(command, args, timeoutMs = 90_000) {
+function run(command, args, timeoutMs = 90_000, allowPartialOutput = false) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -104,7 +114,9 @@ function run(command, args, timeoutMs = 90_000) {
     child.once("error", reject);
     child.once("close", code => {
       clearTimeout(timer);
-      code === 0 || stdout.trim() ? resolve(stdout) : reject(new Error(stderr.trim() || `${command} נכשל`));
+      code === 0 || (allowPartialOutput && stdout.trim())
+        ? resolve(stdout)
+        : reject(new Error(stderr.trim() || `${command} נכשל בקוד ${code ?? "unknown"}`));
     });
   });
 }
@@ -261,11 +273,22 @@ export async function resolveCreatorFromMediaUrl(input, config) {
   }
 
   try {
-    const args = ["--dump-single-json", "--skip-download", "--no-warnings", ...EXTRACTOR_ARGS];
-    const cookiesPath = cookiesPathFor(media.platform, config);
-    if (cookiesPath) args.push("--cookies", cookiesPath);
-    args.push("--", media.url);
-    const info = JSON.parse(await run(config.ytDlpPath, args, 60_000));
+    const clients = media.platform === "YouTube" ? YOUTUBE_CLIENTS : [""];
+    let info;
+    let lastError;
+    for (const client of clients) {
+      try {
+        const args = ["--dump-single-json", "--skip-download", "--no-warnings", ...extractorArgs(media.url, client)];
+        const cookiesPath = cookiesPathFor(media.platform, config);
+        if (cookiesPath) args.push("--cookies", cookiesPath);
+        args.push("--", media.url);
+        info = JSON.parse(await run(config.ytDlpPath, args, 60_000));
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!info) throw lastError;
     const candidates = [
       info.channel_url,
       info.uploader_url,
@@ -328,15 +351,26 @@ export function shouldDeferInstagramScan(subscription, intervalMs, now = Date.no
 }
 
 async function scanYtDlp(creator, config) {
-  const args = [
-    "--flat-playlist", "--playlist-end", String(config.maxItems),
-    "--dump-single-json", "--ignore-errors", "--no-warnings",
-    ...EXTRACTOR_ARGS
-  ];
-  const cookiesPath = cookiesPathFor(creator.platform, config);
-  if (cookiesPath) args.push("--cookies", cookiesPath);
-  args.push("--", creator.url);
-  const parsed = JSON.parse(await run(config.ytDlpPath, args));
+  const clients = creator.platform === "YouTube" ? YOUTUBE_CLIENTS : [""];
+  let parsed;
+  let lastError;
+  for (const client of clients) {
+    try {
+      const args = [
+        "--flat-playlist", "--playlist-end", String(config.maxItems),
+        "--dump-single-json", "--ignore-errors", "--no-warnings",
+        ...extractorArgs(creator.url, client)
+      ];
+      const cookiesPath = cookiesPathFor(creator.platform, config);
+      if (cookiesPath) args.push("--cookies", cookiesPath);
+      args.push("--", creator.url);
+      parsed = JSON.parse(await run(config.ytDlpPath, args, 90_000, true));
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!parsed) throw lastError;
   if (!parsed) return [];
   return normalizeItems(parsed.entries || [parsed], creator.platform);
 }
@@ -421,7 +455,7 @@ async function scanGalleryUrl(url, creator, config, visited = new Set(), deadlin
   if (cookiesPath) args.push("--cookies", cookiesPath);
   args.push("--", url);
   const remainingMs = Math.max(5_000, Math.min(30_000, deadline - Date.now()));
-  const raw = await run(config.galleryDlPath, args, remainingMs);
+  const raw = await run(config.galleryDlPath, args, remainingMs, true);
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -583,17 +617,31 @@ export async function downloadVideo(item, config) {
     await fs.promises.writeFile(destination, Buffer.from(await response.arrayBuffer()));
     return destination;
   }
-  const args = [
-    "--no-playlist",
-    ...EXTRACTOR_ARGS,
-    "-f", "b[ext=mp4][height<=720]/b[height<=720]/b",
-    "-o", output
-  ];
-  const cookiesPath = cookiesPathFor(item.platform, config);
-  if (cookiesPath) args.push("--cookies", cookiesPath);
-  args.push("--", item.url);
   try {
-    await run(config.ytDlpPath, args, 10 * 60_000);
+    const clients = item.platform === "YouTube" ? YOUTUBE_CLIENTS : [""];
+    let completed = false;
+    let lastError;
+    for (const client of clients) {
+      try {
+        const args = [
+          "--no-playlist",
+          ...extractorArgs(item.url, client),
+          "--ffmpeg-location", config.ffmpegPath,
+          "-f", "bv*[height<=720]+ba/b[height<=720]/b",
+          "--merge-output-format", "mp4",
+          "-o", output
+        ];
+        const cookiesPath = cookiesPathFor(item.platform, config);
+        if (cookiesPath) args.push("--cookies", cookiesPath);
+        args.push("--", item.url);
+        await run(config.ytDlpPath, args, 10 * 60_000);
+        completed = true;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!completed) throw lastError;
   } catch (error) {
     if (item.platform !== "Instagram") throw error;
     await downloadInstagramEmbed(item.url, directory);
