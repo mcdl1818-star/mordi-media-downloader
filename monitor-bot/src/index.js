@@ -811,9 +811,9 @@ async function downloadRequestedMedia(chatId, mediaUrl) {
       message_id: status.message_id,
       text: "✅ ההורדה הושלמה ונשלחה."
     }).catch(() => {});
-    const creator = item.platform === "Instagram"
-      ? null
-      : await resolveCreatorFromMediaUrl(mediaUrl, config);
+    const creator = await resolveCreatorFromMediaUrl(mediaUrl, config, {
+      allowPlatformCookies: item.platform !== "Instagram"
+    });
     await sendTrackingChoice(chatId, mediaUrl, creator);
   } catch (error) {
     if (item.platform === "YouTube" && config.webhookUrl) {

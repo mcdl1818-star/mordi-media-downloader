@@ -267,7 +267,19 @@ export async function youtubeCreatorFromOembed(input, fetchImpl = fetch) {
   }
 }
 
-export async function resolveCreatorFromMediaUrl(input, config) {
+export function instagramCreatorFromEmbedHtml(html) {
+  const text = String(html || "");
+  const candidates = [
+    text.match(/class=["']UsernameText["'][^>]*>\s*([A-Za-z0-9._]{1,30})\s*</i)?.[1],
+    text.match(/data-ios-link=["']user\?username=([A-Za-z0-9._]{1,30})(?:&|&amp;)/i)?.[1]
+  ].filter(Boolean);
+  for (const username of candidates) {
+    try { return validateCreatorUrl(`https://www.instagram.com/${username}/`); } catch {}
+  }
+  return null;
+}
+
+export async function resolveCreatorFromMediaUrl(input, config, { allowPlatformCookies = true } = {}) {
   const direct = creatorUrlFromMediaUrl(input);
   if (direct) return direct;
   const media = classifySupportedUrl(input);
@@ -292,7 +304,10 @@ export async function resolveCreatorFromMediaUrl(input, config) {
           headers: { "user-agent": "Mozilla/5.0" }
         });
         if (response.ok) {
-          const usernames = extractInstagramValues(await response.text(), "username");
+          const html = await response.text();
+          const embedCreator = instagramCreatorFromEmbedHtml(html);
+          if (embedCreator) return embedCreator;
+          const usernames = extractInstagramValues(html, "username");
           for (const username of usernames) {
             try { return validateCreatorUrl(`https://www.instagram.com/${username}/`); } catch {}
           }
@@ -310,7 +325,7 @@ export async function resolveCreatorFromMediaUrl(input, config) {
     for (const client of clients) {
       try {
         const args = ["--dump-single-json", "--skip-download", "--no-warnings", ...extractorArgs(media.url, client)];
-        const cookiesPath = cookiesPathFor(media.platform, config);
+        const cookiesPath = allowPlatformCookies ? cookiesPathFor(media.platform, config) : "";
         if (cookiesPath) args.push("--cookies", cookiesPath);
         args.push("--", media.url);
         info = JSON.parse(await run(config.ytDlpPath, args, 60_000));

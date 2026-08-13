@@ -11,6 +11,7 @@ import {
   mediaItemFromUrl,
   parseYouTubeFeed,
   normalizeItems,
+  instagramCreatorFromEmbedHtml,
   instagramSessionCookieExpired,
   isLikelyAuthenticationFailure,
   shouldDeferCreatorScan,
@@ -90,6 +91,12 @@ test("resolves a YouTube creator through the public oEmbed endpoint", async () =
     });
   });
   assert.deepEqual(creator, { url: "https://www.youtube.com/@dj_Avi_Kay", platform: "YouTube" });
+});
+
+test("resolves an Instagram creator from the public embed without a session", () => {
+  const creator = instagramCreatorFromEmbedHtml('<a data-ios-link="user?username=eilon.grouper&amp;utm_source=ig_embed"><span class="UsernameText">eilon.grouper</span></a>');
+  assert.equal(creator.url, "https://www.instagram.com/eilon.grouper/");
+  assert.equal(instagramCreatorFromEmbedHtml('<span class="UsernameText">not valid user!</span>'), null);
 });
 
 test("creates a downloadable item from a supported media link", () => {
