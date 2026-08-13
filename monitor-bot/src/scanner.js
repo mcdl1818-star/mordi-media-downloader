@@ -643,7 +643,11 @@ export async function downloadVideo(item, config) {
   if (["YouTube", "TikTok", "Facebook", "X"].includes(item.platform)) {
     try {
       return await downloadCobaltVideo(item, config);
-    } catch {
+    } catch (error) {
+      // On the hosted monitor, the dedicated worker has a longer lease and an
+      // optional encrypted browser session. Do not hammer YouTube nine more
+      // times from the already-blocked Render IP before handing it off.
+      if (item.platform === "YouTube" && config.webhookUrl) throw error;
       // Keep the local extractors as an independent fallback when the public
       // tunnel is unavailable or rate limited.
     }
