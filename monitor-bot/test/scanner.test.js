@@ -11,6 +11,7 @@ import {
   mediaItemFromUrl,
   parseYouTubeFeed,
   parseXSyndicationTimeline,
+  parseFacebookPagePluginResponse,
   normalizeItems,
   instagramCreatorFromEmbedHtml,
   instagramSessionCookieExpired,
@@ -72,6 +73,31 @@ test("uses the public X embed before requiring an account session", async () => 
   });
   assert.equal(items[0].id, "X:1");
   assert.equal(genericCalls, 0);
+});
+
+test("parses unique Reels from the public Facebook Page Plugin", () => {
+  const markup = [
+    '<a href="/reel/996092996730120/?ref=embed_page">latest</a>',
+    '<a href="https://www.facebook.com/reel/1061387636579678/?ref=embed_page">older</a>',
+    '<a href="/reel/996092996730120/?ref=embed_page">duplicate</a>'
+  ].join("");
+  const response = `for (;;);${JSON.stringify({ payload: { content: { markup: { __html: markup } } } })}`;
+  assert.deepEqual(parseFacebookPagePluginResponse(response, 3).map(item => item.id), [
+    "Facebook:996092996730120",
+    "Facebook:1061387636579678"
+  ]);
+});
+
+test("uses the public Facebook Page Plugin before cookie fallbacks", async () => {
+  let fallbackCalls = 0;
+  const items = await scanCreator({ platform: "Facebook", url: "https://www.facebook.com/nasdaily/" }, {
+    platformCookies: {}, cookiesPath: "", maxItems: 3
+  }, {
+    scanFacebookPagePlugin: async () => [{ id: "Facebook:1", url: "https://www.facebook.com/reel/1/", platform: "Facebook" }],
+    scanProfileHtml: async () => { fallbackCalls += 1; return []; }
+  });
+  assert.equal(items[0].id, "Facebook:1");
+  assert.equal(fallbackCalls, 0);
 });
 
 test("accepts supported creator URLs", () => {
@@ -318,12 +344,13 @@ test("Facebook monitoring never accepts gallery photo results as Reel updates", 
   await assert.rejects(() => scanCreator({ platform: "Facebook", url: "https://www.facebook.com/example/" }, {
     platformCookies: { Facebook: cookie }, cookiesPath: "", maxItems: 3
   }, {
+    scanFacebookPagePlugin: async () => { throw new Error("Facebook Page Plugin HTTP 400"); },
     scanProfileHtml: async () => [],
     scanGalleryDl: async () => {
       galleryCalls += 1;
       return [{ id: "photo", platform: "Facebook", url: "https://cdn.example/photo.jpg" }];
     }
-  }), /לא נמצאו Reels/);
+  }), /Facebook Page Plugin HTTP 400/);
   assert.equal(galleryCalls, 0);
 });
 

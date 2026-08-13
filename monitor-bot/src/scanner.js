@@ -620,6 +620,68 @@ async function scanXSyndication(creator, config, fetchImpl = fetch) {
   return parseXSyndicationTimeline(await response.text(), config.maxItems);
 }
 
+export function parseFacebookPagePluginResponse(input, maxItems = 15) {
+  const raw = String(input || "").replace(/^for \(;;\);/, "");
+  let markup;
+  try {
+    markup = JSON.parse(raw)?.payload?.content?.markup?.__html;
+  } catch {
+    throw new Error("Facebook Page Plugin response is invalid");
+  }
+  if (typeof markup !== "string") throw new Error("Facebook Page Plugin timeline is unavailable");
+  const candidates = [];
+  const patterns = [
+    /(?:https?:\/\/www\.facebook\.com)?\/reel\/(\d+)/gi,
+    /(?:https?:\/\/www\.facebook\.com)?\/[^"'<>\s]+\/videos\/(\d+)/gi,
+    /(?:https?:\/\/www\.facebook\.com)?\/watch\/?\?[^"'<>\s]*\bv=(\d+)/gi
+  ];
+  for (const pattern of patterns) {
+    for (const match of markup.matchAll(pattern)) {
+      const id = match[1];
+      candidates.push({
+        id: `Facebook:${id}`,
+        url: `https://www.facebook.com/reel/${id}/`,
+        title: "Reel חדש",
+        timestamp: 0,
+        platform: "Facebook"
+      });
+    }
+  }
+  return [...new Map(candidates.map(item => [item.id, item])).values()].slice(0, maxItems);
+}
+
+async function scanFacebookPagePlugin(creator, config, fetchImpl = fetch) {
+  const endpoint = new URL("https://www.facebook.com/platform/plugin/tab/renderer/");
+  endpoint.searchParams.set("key", "timeline");
+  endpoint.searchParams.set("config_json", JSON.stringify({
+    app_id: "776730922422337",
+    href: creator.url,
+    width: 500,
+    height: 900,
+    has_cta: false,
+    has_small_header: true,
+    has_adapt_container_width: true,
+    has_cover: false,
+    has_posts: false,
+    tabs: "timeline",
+    can_personalize: false,
+    is_xfbml: false,
+    referer_uri: ""
+  }));
+  const response = await fetchImpl(endpoint, {
+    redirect: "follow",
+    signal: AbortSignal.timeout(20_000),
+    headers: {
+      // The plugin's legacy renderer deliberately serves the public embed to
+      // its compact widget UA. Pretending to be a full Chrome page returns 400.
+      "user-agent": "Mozilla/5.0",
+      "x-requested-with": "XMLHttpRequest"
+    }
+  });
+  if (!response.ok) throw new Error(`Facebook Page Plugin HTTP ${response.status}`);
+  return parseFacebookPagePluginResponse(await response.text(), config.maxItems);
+}
+
 function htmlCandidates(html, creator, maxItems) {
   const patterns = {
     Instagram: /(?:https?:\\?\/\\?\/(?:www\.)?instagram\.com)?\\?\/(reel|p)\\?\/([A-Za-z0-9_-]+)/g,
@@ -676,6 +738,7 @@ export async function scanCreator(creator, config, dependencies = {}) {
   const scanGallery = dependencies.scanGalleryDl || scanGalleryDl;
   const scanHtml = dependencies.scanProfileHtml || scanProfileHtml;
   const scanX = dependencies.scanXSyndication || scanXSyndication;
+  const scanFacebook = dependencies.scanFacebookPagePlugin || scanFacebookPagePlugin;
   let firstError;
   if (creator.platform === "YouTube") {
     try {
@@ -728,10 +791,17 @@ export async function scanCreator(creator, config, dependencies = {}) {
   }
   if (creator.platform === "Facebook") {
     try {
+      // Facebook's public Page Plugin exposes the page timeline without a
+      // Graph API token. An empty Reel list is a successful scan.
+      return await scanFacebook(creator, config);
+    } catch (error) {
+      firstError = error;
+    }
+    try {
       const items = await scanHtml(creator, config);
       if (items.length) return items;
     } catch (error) {
-      firstError = error;
+      firstError ||= error;
     }
     // gallery-dl's Facebook profile extractor enumerates photos/albums. Those
     // are not Reel notifications and often contain short-lived CDN URLs, so
