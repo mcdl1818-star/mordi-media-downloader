@@ -938,5 +938,11 @@ async function poll() {
   }
 }
 
-if (config.webhookUrl) await startWebhook();
-else await poll();
+if (config.webhookUrl) {
+  await startWebhook();
+  setInterval(() => void scanAll().catch(console.error), config.intervalMs).unref();
+  void scanAll().catch(console.error);
+  console.log(`Creator monitor cloud scan active; interval ${config.intervalMs / 60_000} minutes`);
+} else {
+  await poll();
+}
