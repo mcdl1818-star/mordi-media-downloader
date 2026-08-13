@@ -1,8 +1,49 @@
+import crypto from "node:crypto";
+
 const RULES = {
+  YouTube: {
+    domain: /(^|\.)youtube\.com$/i,
+    required: ["LOGIN_INFO"],
+    requiredAny: ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"]
+  },
   Facebook: { domain: /(^|\.)facebook\.com$/i, required: ["c_user", "xs"] },
   TikTok: { domain: /(^|\.)tiktok\.com$/i, requiredAny: ["sessionid", "sessionid_ss", "sid_tt"] },
   X: { domain: /(^|\.)(?:x|twitter)\.com$/i, required: ["auth_token", "ct0"] }
 };
+
+export function createSocialUploadToken(secret, platform, now = Date.now(), ttlMs = 20 * 60_000) {
+  if (!secret || !RULES[platform]) throw new Error("Invalid social upload token request");
+  const body = Buffer.from(JSON.stringify({
+    v: 1,
+    platform,
+    exp: now + ttlMs,
+    nonce: crypto.randomBytes(16).toString("hex")
+  })).toString("base64url");
+  const signature = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+  return `${body}.${signature}`;
+}
+
+export function verifySocialUploadToken(token, secret, platform, now = Date.now()) {
+  try {
+    const [body, supplied, extra] = String(token || "").split(".");
+    if (!body || !supplied || extra || !secret || !RULES[platform]) return false;
+    const expected = crypto.createHmac("sha256", secret).update(body).digest();
+    const actual = Buffer.from(supplied, "base64url");
+    if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) return false;
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    return payload.v === 1
+      && payload.platform === platform
+      && /^[a-f0-9]{32}$/.test(payload.nonce || "")
+      && Number.isFinite(payload.exp)
+      && payload.exp >= now;
+  } catch {
+    return false;
+  }
+}
+
+export function socialUploadTokenFingerprint(token) {
+  return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+}
 
 export function sanitizeSocialCookieFile(input, platform, nowSeconds = Math.floor(Date.now() / 1000)) {
   const rule = RULES[platform];
@@ -26,5 +67,5 @@ export function sanitizeSocialCookieFile(input, platform, nowSeconds = Math.floo
   if (!kept.length) throw new Error("No valid platform cookies");
   if (rule.required && !rule.required.every(name => names.has(name))) throw new Error("Missing required platform cookies");
   if (rule.requiredAny && !rule.requiredAny.some(name => names.has(name))) throw new Error("Missing required platform session cookie");
-  return `${kept.join("\n")}\n`;
+  return `# Netscape HTTP Cookie File\n${kept.join("\n")}\n`;
 }

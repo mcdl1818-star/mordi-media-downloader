@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { sanitizeSocialCookieFile } from "./social-cookies.js";
 
 const TOKEN_VERSION = 1;
 
@@ -50,6 +51,22 @@ export function claimNextYoutubeJob(jobs, chatId, now = Date.now(), leaseMs = 20
   job.leaseUntil = now + leaseMs;
   job.claimedAt = now;
   return { jobId, job };
+}
+
+export function buildYoutubeWorkerClaim(job, callbackToken, youtubeCookies = "") {
+  const sanitized = youtubeCookies
+    ? sanitizeSocialCookieFile(youtubeCookies, "YouTube")
+    : "";
+  return {
+    token: callbackToken,
+    url: job.item.url,
+    kind: "video",
+    height: 480,
+    audioBitrate: 128,
+    mute: false,
+    subtitles: false,
+    youtubeCookiesB64: sanitized ? Buffer.from(sanitized, "utf8").toString("base64") : ""
+  };
 }
 
 export async function dispatchYoutubeWorker(callbackToken, config) {

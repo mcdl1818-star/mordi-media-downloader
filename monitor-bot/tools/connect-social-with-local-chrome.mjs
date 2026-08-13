@@ -3,10 +3,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { sanitizeSocialCookieFile } from "../src/social-cookies.js";
+import {
+  sanitizeSocialCookieFile,
+  createSocialUploadToken
+} from "../src/social-cookies.js";
+import { createCreatorMonitorScanPath } from "../src/instagram-connect.js";
 
 const DEFAULT_CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const PLATFORMS = {
+  YouTube: { url: "https://www.youtube.com/feed/you", filename: "youtube-cookies.txt", domain: /(^|\.)youtube\.com$/i },
   Facebook: { url: "https://www.facebook.com/login/", filename: "facebook-cookies.txt", domain: /(^|\.)facebook\.com$/i },
   TikTok: { url: "https://www.tiktok.com/login", filename: "tiktok-cookies.txt", domain: /(^|\.)tiktok\.com$/i },
   X: { url: "https://x.com/i/flow/login", filename: "x-cookies.txt", domain: /(^|\.)(?:x|twitter)\.com$/i }
@@ -73,7 +78,7 @@ function toNetscape(cookies) {
 async function main() {
   const platform = process.argv[2];
   const rule = PLATFORMS[platform];
-  if (!rule) throw new Error("Usage: node tools/connect-social-with-local-chrome.mjs Facebook|TikTok|X");
+  if (!rule) throw new Error("Usage: node tools/connect-social-with-local-chrome.mjs YouTube|Facebook|TikTok|X");
   const env = loadEnv(path.resolve(".env"));
   if (!env.TELEGRAM_BOT_TOKEN || !env.ALLOWED_TELEGRAM_USER_ID) throw new Error("Missing monitor-bot Telegram settings");
   if (!fs.existsSync(DEFAULT_CHROME)) throw new Error("Google Chrome is not installed");
@@ -101,12 +106,23 @@ async function main() {
       await wait(1_500);
     }
     if (!netscape) throw new Error(`${platform} login was not completed in time`);
+    let serviceUrl = process.argv[3] || env.WEBHOOK_URL || "";
+    if (!serviceUrl) {
+      const webhookResponse = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getWebhookInfo`);
+      const webhookResult = await webhookResponse.json();
+      serviceUrl = webhookResult.ok ? webhookResult.result?.url : "";
+    }
+    if (!serviceUrl) throw new Error("The monitor bot has no active cloud webhook");
+    const endpoint = `${new URL(serviceUrl).origin}${createCreatorMonitorScanPath(env.TELEGRAM_BOT_TOKEN)}`;
     const form = new FormData();
-    form.set("chat_id", env.ALLOWED_TELEGRAM_USER_ID);
-    form.set("document", new Blob([netscape], { type: "text/plain" }), rule.filename);
-    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`, { method: "POST", body: form });
+    form.set("state", "import_social_session");
+    form.set("platform", platform);
+    form.set("upload_token", createSocialUploadToken(env.TELEGRAM_BOT_TOKEN, platform));
+    form.set("cookies", new Blob([netscape], { type: "text/plain" }), rule.filename);
+    netscape = "";
+    const response = await fetch(endpoint, { method: "POST", body: form, signal: AbortSignal.timeout(90_000) });
     const result = await response.json();
-    if (!result.ok) throw new Error(`Telegram rejected the encrypted-import handoff: ${result.description}`);
+    if (!response.ok || !result.ok) throw new Error(`The monitor bot rejected the encrypted session import (${result.error || response.status})`);
     process.stdout.write(JSON.stringify({ ok: true, platform }));
   } finally {
     if (client) {

@@ -4,7 +4,8 @@ import {
   createYoutubeWorkerToken,
   verifyYoutubeWorkerToken,
   dispatchYoutubeWorker,
-  claimNextYoutubeJob
+  claimNextYoutubeJob,
+  buildYoutubeWorkerClaim
 } from "../src/youtube-worker.js";
 
 test("creates a short-lived signed YouTube worker token", () => {
@@ -54,4 +55,19 @@ test("leases a queued YouTube job so parallel workers cannot claim it", () => {
   assert.equal(claimNextYoutubeJob(jobs, "42", now, 20_000).jobId, "b");
   assert.equal(claimNextYoutubeJob(jobs, "42", now, 20_000), null);
   assert.equal(claimNextYoutubeJob(jobs, "42", now + 20_001, 20_000).jobId, "a");
+});
+
+test("returns a sanitized YouTube session only as base64 in a worker claim", () => {
+  const cookies = [
+    ".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tlogin-secret",
+    ".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tsapisid-secret",
+    ".example.com\tTRUE\t/\tTRUE\t0\tsecret\tmust-not-leak"
+  ].join("\n");
+  const claim = buildYoutubeWorkerClaim({ item: { url: "https://youtu.be/abc" } }, "opaque", cookies);
+  const serialized = JSON.stringify(claim);
+  assert.doesNotMatch(serialized, /login-secret|sapisid-secret|must-not-leak/);
+  const restored = Buffer.from(claim.youtubeCookiesB64, "base64").toString("utf8");
+  assert.match(restored, /\tLOGIN_INFO\tlogin-secret/);
+  assert.match(restored, /\tSAPISID\tsapisid-secret/);
+  assert.doesNotMatch(restored, /must-not-leak/);
 });

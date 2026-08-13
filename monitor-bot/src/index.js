@@ -40,10 +40,15 @@ import {
   createYoutubeWorkerToken,
   verifyYoutubeWorkerToken,
   dispatchYoutubeWorker,
-  claimNextYoutubeJob
+  claimNextYoutubeJob,
+  buildYoutubeWorkerClaim
 } from "./youtube-worker.js";
 import { activeInstagramGuardState, instagramAuthSummary, nextInstagramGuard } from "./instagram-guard.js";
-import { sanitizeSocialCookieFile } from "./social-cookies.js";
+import {
+  sanitizeSocialCookieFile,
+  verifySocialUploadToken,
+  socialUploadTokenFingerprint
+} from "./social-cookies.js";
 
 const config = readConfig();
 const telegram = new Telegram(config.token);
@@ -139,6 +144,7 @@ const help = `שלח קישור לפרסום/סרטון בודד כדי להור
 בעת הוספה נשמר המצב הנוכחי, ולכן לא יישלח תוכן ישן.`;
 
 const AUTH_FILES = {
+  "youtube-cookies.txt": "YouTube",
   "instagram-session.enc": "Instagram",
   "instagram-cookies.txt": "Instagram",
   "cookies.txt": "Instagram",
@@ -201,7 +207,7 @@ async function hydrateAuth(platform) {
       await fs.promises.rm(encrypted, { force: true });
     }
   }
-  if (["Facebook", "TikTok", "X"].includes(platform) && auth.kind === "social-cookies-v1") {
+  if (["YouTube", "Facebook", "TikTok", "X"].includes(platform) && auth.kind === "social-cookies-v1") {
     const encrypted = path.join(config.dataDir, `${platform.toLowerCase()}-cookies.enc`);
     const destination = path.join(config.dataDir, `${platform.toLowerCase()}-cookies.txt`);
     await telegram.downloadFile(auth.fileId, encrypted);
@@ -233,16 +239,13 @@ function authRequiredMessage(platform) {
   return `🔐 ${platform} דורש session כדי לקרוא פרופילים משרת ענן.\nשלח לבוט קובץ cookies בפורמט Netscape בשם ${filename}. הבוט יסנן רק את האתר הנכון, יצפין את הגיבוי וימחק את הקובץ הגלוי מהשיחה.`;
 }
 
-async function saveSocialCookies(message, platform) {
-  if (Number(message.document.file_size || 0) > 512_000) throw new Error("Cookie file too large");
+async function persistSocialCookies(input, platform) {
   await fs.promises.mkdir(config.tempDir, { recursive: true });
   await fs.promises.mkdir(config.dataDir, { recursive: true });
-  const uploaded = path.join(config.tempDir, `social-cookies-${crypto.randomUUID()}.txt`);
   const encrypted = path.join(config.tempDir, `social-cookies-${crypto.randomUUID()}.enc`);
   const destination = path.join(config.dataDir, `${platform.toLowerCase()}-cookies.txt`);
   try {
-    await telegram.downloadFile(message.document.file_id, uploaded);
-    const netscape = sanitizeSocialCookieFile(await fs.promises.readFile(uploaded), platform);
+    const netscape = sanitizeSocialCookieFile(input, platform);
     await fs.promises.writeFile(destination, netscape, { mode: 0o600 });
     await fs.promises.writeFile(encrypted, encryptInstagramSession({ platform, netscape }, config.webhookSecret), { mode: 0o600 });
     const sent = await telegram.sendDocument(config.allowedUserId, encrypted,
@@ -264,9 +267,38 @@ async function saveSocialCookies(message, platform) {
       await telegram.call("deleteMessage", { chat_id: config.allowedUserId, message_id: previousMessageId }).catch(() => {});
     }
   } finally {
-    await fs.promises.rm(uploaded, { force: true });
     await fs.promises.rm(encrypted, { force: true });
+  }
+}
+
+async function saveSocialCookies(message, platform) {
+  if (Number(message.document.file_size || 0) > 512_000) throw new Error("Cookie file too large");
+  await fs.promises.mkdir(config.tempDir, { recursive: true });
+  const uploaded = path.join(config.tempDir, `social-cookies-${crypto.randomUUID()}.txt`);
+  try {
+    await telegram.downloadFile(message.document.file_id, uploaded);
+    await persistSocialCookies(await fs.promises.readFile(uploaded), platform);
+  } finally {
+    await fs.promises.rm(uploaded, { force: true });
     await telegram.call("deleteMessage", { chat_id: message.chat.id, message_id: message.message_id }).catch(() => {});
+  }
+}
+
+async function youtubeCookiesForWorker() {
+  const destination = config.platformCookies.YouTube;
+  const auth = store.state.auth?.YouTube;
+  if (!destination || auth?.status === "EXPIRED" || !fs.existsSync(destination)) return "";
+  try {
+    return sanitizeSocialCookieFile(await fs.promises.readFile(destination), "YouTube");
+  } catch {
+    if (auth) {
+      auth.status = "EXPIRED";
+      auth.updatedAt = new Date().toISOString();
+      await store.save().catch(() => {});
+    }
+    delete config.platformCookies.YouTube;
+    await fs.promises.rm(destination, { force: true }).catch(() => {});
+    return "";
   }
 }
 
@@ -1009,7 +1041,7 @@ async function handleMessage(message) {
         return telegram.sendMessage(chatId, "❌ הקובץ לא הכיל סשן Instagram פעיל. פתח instagram.com ב‑Firefox, ודא שאתה מחובר, וייצא שוב cookies.txt מהלשונית של Instagram.");
       }
     }
-    if (["Facebook", "TikTok", "X"].includes(platform)) {
+    if (["YouTube", "Facebook", "TikTok", "X"].includes(platform)) {
       try {
         await saveSocialCookies(message, platform);
         return telegram.sendMessage(chatId, `✅ חיבור ${platform} נבדק, הוצפן ונשמר. הקובץ הגלוי נמחק.`);
@@ -1043,14 +1075,14 @@ async function handleMessage(message) {
   const instagramCommand = text.match(/^\/(?:instagram|connect_instagram)(?:@\w+)?(?:\s+(.+))?$/i);
   if (instagramCommand) return sendInstagramConnect(chatId, instagramCommand[1] || "");
   if (text === "/auth") {
-    const lines = ["Instagram", "Facebook", "TikTok", "X"].map(platform => {
+    const lines = ["YouTube", "Instagram", "Facebook", "TikTok", "X"].map(platform => {
       if (platform === "Instagram") return `${(config.instagramSessionPath || config.platformCookies[platform]) ? "✅" : "⬜"} ${platform}`;
       const active = Boolean(config.platformCookies[platform]) && store.state.auth?.[platform]?.status !== "EXPIRED";
       return `${active ? "✅" : "⬜"} ${platform}${active ? " — חיבור מוצפן פעיל" : ""}`;
     });
     const instagramPrivate = store.state.auth?.Instagram;
     const instagramWeb = store.state.auth?.InstagramWeb;
-    lines[0] = instagramAuthSummary({
+    lines[1] = instagramAuthSummary({
       privateAuth: instagramPrivate,
       privateAvailable: Boolean(config.instagramSessionPath),
       webAuth: instagramWeb,
@@ -1059,7 +1091,7 @@ async function handleMessage(message) {
     }, config.instagramLoginUsername);
     const pending = store.state.auth?.InstagramBootstrap;
     if (pending && !config.instagramSessionPath && !config.platformCookies.Instagram) {
-      lines[0] = `⏳ Instagram — החיבור החלקי נשמר עבור @${pending.username || config.instagramLoginUsername}; סיבה: ${pending.reason || pending.status || "ממתין לאישור"}`;
+      lines[1] = `⏳ Instagram — החיבור החלקי נשמר עבור @${pending.username || config.instagramLoginUsername}; סיבה: ${pending.reason || pending.status || "ממתין לאישור"}`;
     }
     return telegram.sendMessage(chatId, `מצב התחברות:\n${lines.join("\n")}`);
   }
@@ -1256,6 +1288,33 @@ async function handleYoutubeWorkerCallback(request, response) {
     return;
   }
   const state = String(form.get("state") || "");
+  if (state === "import_social_session") {
+    const platform = String(form.get("platform") || "");
+    const token = String(form.get("upload_token") || "");
+    const fingerprint = socialUploadTokenFingerprint(token);
+    const used = store.state.usedSocialUploadTokens || [];
+    const uploaded = form.get("cookies");
+    if (!["YouTube", "Facebook", "TikTok", "X"].includes(platform)
+      || !verifySocialUploadToken(token, config.token, platform)
+      || used.includes(fingerprint)) {
+      sendJson(response, 403, { ok: false, error: "INVALID_OR_EXPIRED_UPLOAD_TOKEN" });
+      return;
+    }
+    if (!(uploaded instanceof Blob) || uploaded.size < 1 || uploaded.size > 512_000) {
+      sendJson(response, 400, { ok: false, error: "INVALID_COOKIE_FILE" });
+      return;
+    }
+    store.state.usedSocialUploadTokens = [fingerprint, ...used.filter(value => value !== fingerprint)].slice(0, 50);
+    try {
+      await persistSocialCookies(Buffer.from(await uploaded.arrayBuffer()), platform);
+      sendJson(response, 200, { ok: true, platform });
+    } catch (error) {
+      store.state.usedSocialUploadTokens = used;
+      await store.save().catch(() => {});
+      sendJson(response, 400, { ok: false, error: "INVALID_COOKIE_FILE" });
+    }
+    return;
+  }
   if (state === "claim_next") {
     if (youtubeClaimLock) {
       sendJson(response, 409, { ok: false, error: "QUEUE_BUSY" });
@@ -1271,17 +1330,10 @@ async function handleYoutubeWorkerCallback(request, response) {
       }
       await store.save();
       const callbackToken = createYoutubeWorkerToken(config.webhookSecret, claimed.jobId, Date.now(), YOUTUBE_JOB_TTL_MS);
+      const youtubeCookies = await youtubeCookiesForWorker();
       sendJson(response, 200, {
         ok: true,
-        job: {
-          token: callbackToken,
-          url: claimed.job.item.url,
-          kind: "video",
-          height: 480,
-          audioBitrate: 128,
-          mute: false,
-          subtitles: false
-        }
+        job: buildYoutubeWorkerClaim(claimed.job, callbackToken, youtubeCookies)
       });
     } finally {
       youtubeClaimLock = false;
@@ -1305,14 +1357,10 @@ async function handleYoutubeWorkerCallback(request, response) {
     job.leaseUntil = Date.now() + YOUTUBE_JOB_LEASE_MS;
     job.claimedAt = Date.now();
     await store.save();
+    const youtubeCookies = await youtubeCookiesForWorker();
     sendJson(response, 200, {
       ok: true,
-      url: job.item.url,
-      kind: "video",
-      height: 480,
-      audioBitrate: 128,
-      mute: false,
-      subtitles: false
+      ...buildYoutubeWorkerClaim(job, String(form.get("token") || ""), youtubeCookies)
     });
     return;
   }
