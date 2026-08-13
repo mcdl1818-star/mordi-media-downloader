@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { activeInstagramGuardState, nextInstagramGuard } from "../src/instagram-guard.js";
+import { activeInstagramGuardState, instagramAuthSummary, nextInstagramGuard } from "../src/instagram-guard.js";
 
 const config = {
   instagramRateLimitCooldownMs: 2 * 60 * 60_000,
@@ -31,4 +31,27 @@ test("allows scanning again after a temporary guard expires", () => {
   const guard = nextInstagramGuard(null, "NETWORK_ERROR", config, now);
   assert.equal(activeInstagramGuardState(guard, now + 29 * 60_000), guard);
   assert.equal(activeInstagramGuardState(guard, now + 31 * 60_000), null);
+});
+
+test("reports an active private session even when stale web auth also exists", () => {
+  const value = instagramAuthSummary({
+    privateAuth: { username: "vogelnati", status: "ACTIVE" },
+    privateAvailable: true,
+    webAuth: { username: "vogelnati", status: "EXPIRED" },
+    webAvailable: false,
+    guard: null
+  }, "vogelnati");
+  assert.match(value, /✅ Instagram/);
+  assert.match(value, /מהמחשב פעיל/);
+});
+
+test("never reports expired web auth as an active Instagram connection", () => {
+  const value = instagramAuthSummary({
+    privateAuth: null,
+    privateAvailable: false,
+    webAuth: { username: "vogelnati", status: "EXPIRED" },
+    webAvailable: false,
+    guard: null
+  }, "vogelnati");
+  assert.match(value, /אין חיבור פעיל/);
 });

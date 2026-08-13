@@ -13,7 +13,8 @@ import {
   normalizeItems,
   instagramSessionCookieExpired,
   isLikelyAuthenticationFailure,
-  shouldDeferInstagramScan
+  shouldDeferInstagramScan,
+  scanCreator
 } from "../src/scanner.js";
 
 test("accepts supported creator URLs", () => {
@@ -62,6 +63,11 @@ test("classifies profile links separately from individual media", () => {
   assert.equal(classifySupportedUrl("https://x.com/creator/status/123").kind, "media");
 });
 
+test("classifies Facebook posts and TikTok photo posts as individual media", () => {
+  assert.equal(classifySupportedUrl("https://www.facebook.com/example/posts/123").kind, "media");
+  assert.equal(classifySupportedUrl("https://www.tiktok.com/@example/photo/123456789").kind, "media");
+});
+
 test("extracts obvious creator profiles from individual media URLs", () => {
   assert.deepEqual(creatorUrlFromMediaUrl("https://www.tiktok.com/@creator/video/123"), {
     url: "https://www.tiktok.com/@creator/",
@@ -106,7 +112,8 @@ test("detects a missing or expired Instagram session cookie", t => {
 
 test("recognizes authentication failures without classifying timeouts as expired sessions", () => {
   assert.equal(isLikelyAuthenticationFailure(new Error("login_required")), true);
-  assert.equal(isLikelyAuthenticationFailure(new Error("HTTP 403")), true);
+  assert.equal(isLikelyAuthenticationFailure(new Error("HTTP 401")), true);
+  assert.equal(isLikelyAuthenticationFailure(new Error("HTTP 403")), false);
   assert.equal(isLikelyAuthenticationFailure(new Error("request timed out")), false);
 });
 
@@ -125,6 +132,49 @@ test("defers Instagram scans for the full safe interval or an explicit next-chec
 
 test("recognizes temporary Instagram deferrals as non-authentication failures", () => {
   assert.equal(isLikelyAuthenticationFailure(new Error("DEFERRED:Instagram:RATE_LIMIT")), false);
+});
+
+test("uses a valid private Instagram session before considering an expired web cookie", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "monitor-private-priority-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const expiredCookie = path.join(directory, "instagram.txt");
+  fs.writeFileSync(expiredCookie, ".instagram.com\tTRUE\t/\tTRUE\t1\tsessionid\t12345678901234567890\n");
+  const creator = { platform: "Instagram", url: "https://www.instagram.com/example/" };
+  let privateCalls = 0;
+  const items = await scanCreator(creator, {
+    instagramSessionPath: path.join(directory, "private.json"),
+    platformCookies: { Instagram: expiredCookie },
+    cookiesPath: "",
+    maxItems: 3
+  }, {
+    scanInstagramSession: async () => {
+      privateCalls += 1;
+      return [{ id: "private:1", platform: "Instagram", url: "https://www.instagram.com/reel/one/" }];
+    },
+    scanYtDlp: async () => assert.fail("web yt-dlp fallback should not run"),
+    scanGalleryDl: async () => assert.fail("web gallery fallback should not run"),
+    scanProfileHtml: async () => assert.fail("web HTML fallback should not run")
+  });
+  assert.equal(privateCalls, 1);
+  assert.equal(items[0].id, "private:1");
+});
+
+test("Facebook monitoring never accepts gallery photo results as Reel updates", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "monitor-facebook-video-only-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const cookie = path.join(directory, "facebook.txt");
+  fs.writeFileSync(cookie, ".facebook.com\tTRUE\t/\tTRUE\t0\tc_user\t123\n");
+  let galleryCalls = 0;
+  await assert.rejects(() => scanCreator({ platform: "Facebook", url: "https://www.facebook.com/example/" }, {
+    platformCookies: { Facebook: cookie }, cookiesPath: "", maxItems: 3
+  }, {
+    scanProfileHtml: async () => [],
+    scanGalleryDl: async () => {
+      galleryCalls += 1;
+      return [{ id: "photo", platform: "Facebook", url: "https://cdn.example/photo.jpg" }];
+    }
+  }), /לא נמצאו Reels/);
+  assert.equal(galleryCalls, 0);
 });
 
 test("rejects single publication URLs", () => {

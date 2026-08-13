@@ -39,9 +39,11 @@ import {
 import {
   createYoutubeWorkerToken,
   verifyYoutubeWorkerToken,
-  dispatchYoutubeWorker
+  dispatchYoutubeWorker,
+  claimNextYoutubeJob
 } from "./youtube-worker.js";
-import { activeInstagramGuardState, nextInstagramGuard } from "./instagram-guard.js";
+import { activeInstagramGuardState, instagramAuthSummary, nextInstagramGuard } from "./instagram-guard.js";
+import { sanitizeSocialCookieFile } from "./social-cookies.js";
 
 const config = readConfig();
 const telegram = new Telegram(config.token);
@@ -59,7 +61,9 @@ const pendingActions = new Map();
 const busyUsers = new Set();
 const ACTION_TTL_MS = 30 * 60_000;
 let lastDownloadDiagnostic = null;
-const YOUTUBE_JOB_TTL_MS = 45 * 60_000;
+const YOUTUBE_JOB_TTL_MS = 6 * 60 * 60_000;
+const YOUTUBE_JOB_LEASE_MS = 20 * 60_000;
+let youtubeClaimLock = false;
 
 function resetInstagramProtectionAfterConnection() {
   delete store.state.instagramGuard;
@@ -153,6 +157,7 @@ function isInstagramCookieExport(filename) {
 async function hydrateAuth(platform) {
   const auth = store.state.auth?.[platform];
   if (!auth?.fileId) return false;
+  if (["EXPIRED", "STANDBY"].includes(auth.status)) return false;
   if (platform === "InstagramWeb" && auth.kind === "instagram-web-cookies-v1") {
     const encrypted = path.join(config.dataDir, "instagram-web-cookies.enc");
     const destination = path.join(config.dataDir, "instagram-web-cookies.txt");
@@ -196,6 +201,20 @@ async function hydrateAuth(platform) {
       await fs.promises.rm(encrypted, { force: true });
     }
   }
+  if (["Facebook", "TikTok", "X"].includes(platform) && auth.kind === "social-cookies-v1") {
+    const encrypted = path.join(config.dataDir, `${platform.toLowerCase()}-cookies.enc`);
+    const destination = path.join(config.dataDir, `${platform.toLowerCase()}-cookies.txt`);
+    await telegram.downloadFile(auth.fileId, encrypted);
+    try {
+      const payload = decryptInstagramSession(await fs.promises.readFile(encrypted), config.webhookSecret);
+      const netscape = sanitizeSocialCookieFile(payload.netscape, platform);
+      await fs.promises.writeFile(destination, netscape, { mode: 0o600 });
+      config.platformCookies[platform] = destination;
+      return true;
+    } finally {
+      await fs.promises.rm(encrypted, { force: true });
+    }
+  }
   const destination = `${config.dataDir}/${platform.toLowerCase()}-cookies.txt`;
   await telegram.downloadFile(auth.fileId, destination);
   config.platformCookies[platform] = destination;
@@ -211,7 +230,44 @@ function authRequiredMessage(platform) {
     return "🔐 כדי לעקוב באופן קבוע אחרי פוסטים, Reels וסטוריז, יש לחבר חשבון Instagram פעם אחת. לחץ על הכפתור למטה; הסיסמה אינה נשמרת.";
   }
   const filename = platform === "X" ? "x-cookies.txt" : `${platform.toLowerCase()}-cookies.txt`;
-  return `🔐 ${platform} דורש session כדי לקרוא פרופילים משרת ענן.\nשלח לבוט קובץ cookies בפורמט Netscape בשם ${filename}, ולאחר האישור שלח שוב את קישור הפרופיל. הקובץ נשמר באופן פרטי ב-Telegram ולא ב-GitHub.`;
+  return `🔐 ${platform} דורש session כדי לקרוא פרופילים משרת ענן.\nשלח לבוט קובץ cookies בפורמט Netscape בשם ${filename}. הבוט יסנן רק את האתר הנכון, יצפין את הגיבוי וימחק את הקובץ הגלוי מהשיחה.`;
+}
+
+async function saveSocialCookies(message, platform) {
+  if (Number(message.document.file_size || 0) > 512_000) throw new Error("Cookie file too large");
+  await fs.promises.mkdir(config.tempDir, { recursive: true });
+  await fs.promises.mkdir(config.dataDir, { recursive: true });
+  const uploaded = path.join(config.tempDir, `social-cookies-${crypto.randomUUID()}.txt`);
+  const encrypted = path.join(config.tempDir, `social-cookies-${crypto.randomUUID()}.enc`);
+  const destination = path.join(config.dataDir, `${platform.toLowerCase()}-cookies.txt`);
+  try {
+    await telegram.downloadFile(message.document.file_id, uploaded);
+    const netscape = sanitizeSocialCookieFile(await fs.promises.readFile(uploaded), platform);
+    await fs.promises.writeFile(destination, netscape, { mode: 0o600 });
+    await fs.promises.writeFile(encrypted, encryptInstagramSession({ platform, netscape }, config.webhookSecret), { mode: 0o600 });
+    const sent = await telegram.sendDocument(config.allowedUserId, encrypted,
+      `🔐 גיבוי מוצפן של חיבור ${platform} — אין למחוק`,
+      { filename: `${platform.toLowerCase()}-cookies.enc`, disableNotification: true });
+    const previousMessageId = store.state.auth?.[platform]?.messageId;
+    store.state.auth ||= {};
+    store.state.auth[platform] = {
+      fileId: sent.document.file_id,
+      messageId: sent.message_id,
+      filename: `${platform.toLowerCase()}-cookies.enc`,
+      kind: "social-cookies-v1",
+      status: "ACTIVE",
+      updatedAt: new Date().toISOString()
+    };
+    config.platformCookies[platform] = destination;
+    await store.save();
+    if (previousMessageId && previousMessageId !== sent.message_id) {
+      await telegram.call("deleteMessage", { chat_id: config.allowedUserId, message_id: previousMessageId }).catch(() => {});
+    }
+  } finally {
+    await fs.promises.rm(uploaded, { force: true });
+    await fs.promises.rm(encrypted, { force: true });
+    await telegram.call("deleteMessage", { chat_id: message.chat.id, message_id: message.message_id }).catch(() => {});
+  }
 }
 
 function instagramConnectUrl(username = "") {
@@ -401,7 +457,7 @@ function sendInstagramFileInstructions(chatId) {
   );
 }
 
-async function saveInstagramSession(session, username) {
+async function saveInstagramSession(session, username, { activate = true } = {}) {
   await fs.promises.mkdir(config.dataDir, { recursive: true });
   const destination = path.join(config.dataDir, "instagram-session.json");
   const encrypted = path.join(config.tempDir, `instagram-session-${crypto.randomUUID()}.enc`);
@@ -427,7 +483,13 @@ async function saveInstagramSession(session, username) {
       status: "ACTIVE",
       updatedAt: new Date().toISOString()
     };
-    resetInstagramProtectionAfterConnection();
+    if (store.state.auth.InstagramWeb) {
+      store.state.auth.InstagramWeb.status = "STANDBY";
+      store.state.auth.InstagramWeb.updatedAt = new Date().toISOString();
+      delete config.platformCookies.Instagram;
+      await fs.promises.rm(path.join(config.dataDir, "instagram-web-cookies.txt"), { force: true });
+    }
+    if (activate) resetInstagramProtectionAfterConnection();
     const bootstrapMessageId = store.state.auth.InstagramBootstrap?.messageId;
     delete store.state.auth.InstagramBootstrap;
     config.instagramSessionPath = destination;
@@ -453,7 +515,7 @@ async function refreshInstagramPrivateBackupIfChanged() {
   const fingerprint = privateSessionFingerprint(serialized);
   if (fingerprint === instagramPrivateSessionFingerprint) return;
   const username = store.state.auth?.Instagram?.username || config.instagramLoginUsername;
-  await saveInstagramSession(JSON.parse(serialized), username);
+  await saveInstagramSession(JSON.parse(serialized), username, { activate: false });
 }
 
 async function queueYoutubeWorkerDelivery({
@@ -628,6 +690,12 @@ function friendlyDownloadError(error) {
 
 async function downloadRequestedMedia(chatId, mediaUrl) {
   const item = mediaItemFromUrl(mediaUrl);
+  if (item.platform === "Instagram" && activeInstagramGuard()) {
+    await telegram.sendMessage(chatId,
+      "⏸️ Instagram נמצא כרגע בהשהיית הגנה. לא אשתמש בסשן המעקב להורדה ידנית בזמן הזה, כדי לא להאריך את ההגבלה."
+    );
+    return;
+  }
   const status = await telegram.sendMessage(chatId, `⬇️ מוריד עכשיו מ-${item.platform}...`);
   let file;
   try {
@@ -701,10 +769,18 @@ async function handleCallback(query) {
       return;
     }
     if (kind === "track") {
+      if (creator.platform === "Instagram" && activeInstagramGuard()) {
+        await telegram.sendMessage(query.message.chat.id, "⏸️ Instagram בהשהיית הגנה. שמרתי את החיבור ולא אבצע כעת בקשה ידנית שעלולה להאריך את ההגבלה.");
+        return;
+      }
       await addSubscription(query.message.chat.id, creator.url);
       return;
     }
     if (kind === "latest") {
+      if (creator.platform === "Instagram" && activeInstagramGuard()) {
+        await telegram.sendMessage(query.message.chat.id, "⏸️ Instagram בהשהיית הגנה. ההורדה האחרונה תתאפשר לאחר שההשהיה תסתיים.");
+        return;
+      }
       const items = await scanCreator(creator, config);
       if (!items.length) throw new Error("לא נמצא תוכן אחרון בפרופיל");
       const subscription = { ...creator, label: profileLabel(creator) };
@@ -801,11 +877,10 @@ async function scanAll({ report = false } = {}) {
           subscription.lastCheckedAt = new Date().toISOString();
           subscription.nextInstagramCheckAt = "";
           imposeInstagramGuard("AUTH_REQUIRED");
-          if (store.state.auth?.Instagram) {
+          if (config.instagramSessionPath && store.state.auth?.Instagram) {
             store.state.auth.Instagram.status = "EXPIRED";
             store.state.auth.Instagram.updatedAt = new Date().toISOString();
-          }
-          if (store.state.auth?.InstagramWeb) {
+          } else if (store.state.auth?.InstagramWeb) {
             store.state.auth.InstagramWeb.status = "EXPIRED";
             store.state.auth.InstagramWeb.updatedAt = new Date().toISOString();
           }
@@ -831,6 +906,12 @@ async function addSubscription(chatId, text) {
   const creator = validateCreatorUrl(text);
   if (store.state.subscriptions.some(item => item.url === creator.url)) {
     await telegram.sendMessage(chatId, "הכתובת כבר נמצאת במעקב.");
+    return;
+  }
+  if (creator.platform === "Instagram" && activeInstagramGuard()) {
+    await telegram.sendMessage(chatId,
+      "⏸️ Instagram בהשהיית הגנה. לא אבדוק כעת את הפרופיל כדי לא להאריך את ההגבלה; נסה שוב לאחר סיום ההשהיה."
+    );
     return;
   }
   if (creator.platform === "Instagram" && !config.instagramSessionPath && !config.platformCookies.Instagram) {
@@ -928,6 +1009,15 @@ async function handleMessage(message) {
         return telegram.sendMessage(chatId, "❌ הקובץ לא הכיל סשן Instagram פעיל. פתח instagram.com ב‑Firefox, ודא שאתה מחובר, וייצא שוב cookies.txt מהלשונית של Instagram.");
       }
     }
+    if (["Facebook", "TikTok", "X"].includes(platform)) {
+      try {
+        await saveSocialCookies(message, platform);
+        return telegram.sendMessage(chatId, `✅ חיבור ${platform} נבדק, הוצפן ונשמר. הקובץ הגלוי נמחק.`);
+      } catch (error) {
+        console.warn(`${platform} cookie import:`, error.message);
+        return telegram.sendMessage(chatId, `❌ הקובץ אינו מכיל חיבור ${platform} תקין. התחבר בדפדפן וייצא cookies חדשים מהאתר הנכון.`);
+      }
+    }
     store.state.auth ||= {};
     store.state.auth[platform] = {
       fileId: message.document.file_id,
@@ -953,26 +1043,20 @@ async function handleMessage(message) {
   const instagramCommand = text.match(/^\/(?:instagram|connect_instagram)(?:@\w+)?(?:\s+(.+))?$/i);
   if (instagramCommand) return sendInstagramConnect(chatId, instagramCommand[1] || "");
   if (text === "/auth") {
-    const lines = ["Instagram", "Facebook", "TikTok", "X"].map(platform =>
-      `${(platform === "Instagram" ? (config.instagramSessionPath || config.platformCookies[platform]) : config.platformCookies[platform]) ? "✅" : "⬜"} ${platform}`
-    );
-    const instagramWeb = store.state.auth?.InstagramWeb;
-    if (instagramWeb && config.platformCookies.Instagram) {
-      lines[0] = instagramWeb.status === "EXPIRED"
-        ? "⚠️ Instagram — החיבור מהטלפון דורש חידוש"
-        : `✅ Instagram — החיבור מהטלפון פעיל עבור @${instagramWeb.username || config.instagramLoginUsername}`;
-    }
+    const lines = ["Instagram", "Facebook", "TikTok", "X"].map(platform => {
+      if (platform === "Instagram") return `${(config.instagramSessionPath || config.platformCookies[platform]) ? "✅" : "⬜"} ${platform}`;
+      const active = Boolean(config.platformCookies[platform]) && store.state.auth?.[platform]?.status !== "EXPIRED";
+      return `${active ? "✅" : "⬜"} ${platform}${active ? " — חיבור מוצפן פעיל" : ""}`;
+    });
     const instagramPrivate = store.state.auth?.Instagram;
-    if (!instagramWeb && instagramPrivate && config.instagramSessionPath) {
-      lines[0] = instagramPrivate.status === "EXPIRED" || activeInstagramGuard()?.reason === "AUTH_REQUIRED"
-        ? "⚠️ Instagram — החיבור נעצר ודורש חידוש חד-פעמי"
-        : `✅ Instagram — סשן קבוע פעיל עבור @${instagramPrivate.username || config.instagramLoginUsername}`;
-    }
-    const instagramGuard = activeInstagramGuard();
-    if (instagramGuard && instagramGuard.reason !== "AUTH_REQUIRED") {
-      const until = new Date(instagramGuard.until).toLocaleString("he-IL", { timeZone: "Asia/Jerusalem" });
-      lines[0] = `⏸️ Instagram — החיבור שמור; הסריקות בהשהיית הגנה עד ${until}`;
-    }
+    const instagramWeb = store.state.auth?.InstagramWeb;
+    lines[0] = instagramAuthSummary({
+      privateAuth: instagramPrivate,
+      privateAvailable: Boolean(config.instagramSessionPath),
+      webAuth: instagramWeb,
+      webAvailable: Boolean(config.platformCookies.Instagram),
+      guard: store.state.instagramGuard
+    }, config.instagramLoginUsername);
     const pending = store.state.auth?.InstagramBootstrap;
     if (pending && !config.instagramSessionPath && !config.platformCookies.Instagram) {
       lines[0] = `⏳ Instagram — החיבור החלקי נשמר עבור @${pending.username || config.instagramLoginUsername}; סיבה: ${pending.reason || pending.status || "ממתין לאישור"}`;
@@ -1173,28 +1257,35 @@ async function handleYoutubeWorkerCallback(request, response) {
   }
   const state = String(form.get("state") || "");
   if (state === "claim_next") {
-    pruneYoutubeJobs();
-    const next = Object.entries(store.state.youtubeJobs || {})
-      .filter(([, job]) => !job.processing && job.chatId === String(config.allowedUserId))
-      .sort((left, right) => left[1].createdAt - right[1].createdAt)[0];
-    if (!next) {
-      sendJson(response, 200, { ok: true, job: null });
+    if (youtubeClaimLock) {
+      sendJson(response, 409, { ok: false, error: "QUEUE_BUSY" });
       return;
     }
-    const [jobId, job] = next;
-    const callbackToken = createYoutubeWorkerToken(config.webhookSecret, jobId, Date.now(), YOUTUBE_JOB_TTL_MS);
-    sendJson(response, 200, {
-      ok: true,
-      job: {
-        token: callbackToken,
-        url: job.item.url,
-        kind: "video",
-        height: 480,
-        audioBitrate: 128,
-        mute: false,
-        subtitles: false
+    youtubeClaimLock = true;
+    try {
+      pruneYoutubeJobs();
+      const claimed = claimNextYoutubeJob(store.state.youtubeJobs, config.allowedUserId, Date.now(), YOUTUBE_JOB_LEASE_MS);
+      if (!claimed) {
+        sendJson(response, 200, { ok: true, job: null });
+        return;
       }
-    });
+      await store.save();
+      const callbackToken = createYoutubeWorkerToken(config.webhookSecret, claimed.jobId, Date.now(), YOUTUBE_JOB_TTL_MS);
+      sendJson(response, 200, {
+        ok: true,
+        job: {
+          token: callbackToken,
+          url: claimed.job.item.url,
+          kind: "video",
+          height: 480,
+          audioBitrate: 128,
+          mute: false,
+          subtitles: false
+        }
+      });
+    } finally {
+      youtubeClaimLock = false;
+    }
     return;
   }
   let payload;
@@ -1211,6 +1302,9 @@ async function handleYoutubeWorkerCallback(request, response) {
     return;
   }
   if (state === "claim") {
+    job.leaseUntil = Date.now() + YOUTUBE_JOB_LEASE_MS;
+    job.claimedAt = Date.now();
+    await store.save();
     sendJson(response, 200, {
       ok: true,
       url: job.item.url,
@@ -1223,6 +1317,8 @@ async function handleYoutubeWorkerCallback(request, response) {
     return;
   }
   if (state === "started") {
+    job.leaseUntil = Date.now() + YOUTUBE_JOB_LEASE_MS;
+    await store.save();
     await telegram.call("editMessageText", {
       chat_id: job.chatId,
       message_id: job.statusMessageId,

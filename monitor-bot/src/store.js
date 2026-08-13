@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
 const STATE_CAPTION = "🔒 קובץ מצב פנימי של בוט המעקב — אין למחוק או להסיר הצמדה";
 
@@ -11,6 +12,7 @@ export class Store {
     this.localFile = path.join(directory, "subscriptions.json");
     this.state = { version: 3, paused: false, subscriptions: [], auth: {} };
     this.pinnedMessageId = null;
+    this.saveQueue = Promise.resolve();
   }
 
   async load() {
@@ -37,21 +39,26 @@ export class Store {
   }
 
   async save() {
-    const temporary = `${this.localFile}.tmp`;
-    await fs.promises.writeFile(temporary, JSON.stringify(this.state, null, 2), "utf8");
-    await fs.promises.rename(temporary, this.localFile);
-    const sent = await this.telegram.sendDocument(this.chatId, this.localFile, STATE_CAPTION);
-    await this.telegram.call("pinChatMessage", {
-      chat_id: this.chatId,
-      message_id: sent.message_id,
-      disable_notification: true
-    });
-    if (this.pinnedMessageId && this.pinnedMessageId !== sent.message_id) {
-      await this.telegram.call("deleteMessage", {
+    const snapshot = JSON.stringify(this.state, null, 2);
+    const operation = this.saveQueue.then(async () => {
+      const temporary = `${this.localFile}.${crypto.randomUUID()}.tmp`;
+      await fs.promises.writeFile(temporary, snapshot, "utf8");
+      await fs.promises.rename(temporary, this.localFile);
+      const sent = await this.telegram.sendDocument(this.chatId, this.localFile, STATE_CAPTION);
+      await this.telegram.call("pinChatMessage", {
         chat_id: this.chatId,
-        message_id: this.pinnedMessageId
-      }).catch(() => {});
-    }
-    this.pinnedMessageId = sent.message_id;
+        message_id: sent.message_id,
+        disable_notification: true
+      });
+      if (this.pinnedMessageId && this.pinnedMessageId !== sent.message_id) {
+        await this.telegram.call("deleteMessage", {
+          chat_id: this.chatId,
+          message_id: this.pinnedMessageId
+        }).catch(() => {});
+      }
+      this.pinnedMessageId = sent.message_id;
+    });
+    this.saveQueue = operation.catch(() => {});
+    return operation;
   }
 }

@@ -39,6 +39,19 @@ export function verifyYoutubeWorkerToken(token, secret, now = Date.now()) {
   return payload;
 }
 
+export function claimNextYoutubeJob(jobs, chatId, now = Date.now(), leaseMs = 20 * 60_000) {
+  const next = Object.entries(jobs || {})
+    .filter(([, job]) => !job.processing
+      && job.chatId === String(chatId)
+      && (!Number.isFinite(job.leaseUntil) || job.leaseUntil <= now))
+    .sort((left, right) => left[1].createdAt - right[1].createdAt)[0];
+  if (!next) return null;
+  const [jobId, job] = next;
+  job.leaseUntil = now + leaseMs;
+  job.claimedAt = now;
+  return { jobId, job };
+}
+
 export async function dispatchYoutubeWorker(callbackToken, config) {
   if (!config.githubActionsToken) return false;
   const endpoint = `https://api.github.com/repos/${config.githubActionsRepo}/actions/workflows/${config.githubActionsWorkflow}/dispatches`;

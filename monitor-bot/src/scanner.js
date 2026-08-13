@@ -47,8 +47,10 @@ function isSingleMediaUrl(url, platform) {
   if (platform === "Facebook") return url.hostname === "fb.watch"
     || /\/(?:reel|watch)(?:\/|$)/i.test(url.pathname)
     || /\/videos?\//i.test(url.pathname)
+    || /\/(?:posts?|share\/(?:p|r|v))\//i.test(url.pathname)
     || url.searchParams.has("v");
   if (platform === "TikTok") return /\/@[^/]+\/video\/\d+/i.test(url.pathname)
+    || /\/@[^/]+\/photo\/\d+/i.test(url.pathname)
     || /^(?:vm|vt)\.tiktok\.com$/i.test(url.hostname);
   if (platform === "X") return /\/[^/]+\/status\/\d+/i.test(url.pathname);
   if (platform === "YouTube") return url.hostname === "youtu.be"
@@ -335,7 +337,7 @@ export function instagramSessionCookieExpired(file, nowSeconds = Math.floor(Date
 }
 
 export function isLikelyAuthenticationFailure(error) {
-  return /(?:auth(?:entication)?[_ -]?required|login[_ -]?required|not logged in|session (?:has )?expired|invalid (?:cookie|session)|cookie.+expired|HTTP (?:401|403)|challenge_required)/i
+  return /(?:auth(?:entication)?[_ -]?required|login[_ -]?required|not logged in|session (?:has )?expired|invalid (?:cookie|session)|cookie.+expired|HTTP 401|challenge_required)/i
     .test(String(error?.message || error || ""));
 }
 
@@ -548,7 +550,11 @@ async function scanProfileHtml(creator, config) {
   return htmlCandidates(await response.text(), creator, config.maxItems);
 }
 
-export async function scanCreator(creator, config) {
+export async function scanCreator(creator, config, dependencies = {}) {
+  const scanPrivate = dependencies.scanInstagramSession || scanInstagramSession;
+  const scanYt = dependencies.scanYtDlp || scanYtDlp;
+  const scanGallery = dependencies.scanGalleryDl || scanGalleryDl;
+  const scanHtml = dependencies.scanProfileHtml || scanProfileHtml;
   if (creator.platform === "YouTube") {
     try {
       const items = await scanYouTubeFeed(creator, config);
@@ -559,13 +565,15 @@ export async function scanCreator(creator, config) {
   }
   const needsSession = ["Instagram", "Facebook", "X"].includes(creator.platform);
   const platformCookiePath = cookiesPathFor(creator.platform, config);
-  if (creator.platform === "Instagram" && platformCookiePath && instagramSessionCookieExpired(platformCookiePath)) {
+  // The private mobile session is the primary Instagram identity. A stale web
+  // cookie must never prevent a valid private session from being tried.
+  if (creator.platform === "Instagram" && !config.instagramSessionPath && platformCookiePath && instagramSessionCookieExpired(platformCookiePath)) {
     throw new Error("AUTH_REQUIRED:Instagram");
   }
   let firstError;
   if (creator.platform === "Instagram" && config.instagramSessionPath) {
     try {
-      const items = await scanInstagramSession(creator, config);
+      const items = await scanPrivate(creator, config);
       // An empty authenticated result is still a successful scan. Falling
       // through would repeat the same profile through several web extractors.
       return items;
@@ -577,20 +585,33 @@ export async function scanCreator(creator, config) {
       firstError = error;
     }
   }
+  if (creator.platform === "Facebook") {
+    try {
+      const items = await scanHtml(creator, config);
+      if (items.length) return items;
+    } catch (error) {
+      firstError = error;
+    }
+    // gallery-dl's Facebook profile extractor enumerates photos/albums. Those
+    // are not Reel notifications and often contain short-lived CDN URLs, so
+    // never treat them as creator video updates.
+    if (!platformCookiePath) throw new Error("AUTH_REQUIRED:Facebook");
+    throw firstError || new Error("לא נמצאו Reels בפרופיל Facebook המחובר.");
+  }
   try {
-    const items = await scanYtDlp(creator, config);
+    const items = await scanYt(creator, config);
     if (items.length) return items;
   } catch (error) {
     firstError = error;
   }
   try {
-    const items = await scanGalleryDl(creator, config);
+    const items = await scanGallery(creator, config);
     if (items.length) return items;
   } catch (error) {
     firstError ||= error;
   }
   try {
-    const items = await scanProfileHtml(creator, config);
+    const items = await scanHtml(creator, config);
     if (items.length) return items;
   } catch (error) {
     firstError ||= error;

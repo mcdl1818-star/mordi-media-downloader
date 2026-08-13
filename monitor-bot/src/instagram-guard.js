@@ -24,3 +24,21 @@ export function nextInstagramGuard(previous, reason, config, now = Date.now()) {
     until: new Date(now + delay).toISOString()
   };
 }
+
+export function instagramAuthSummary({ privateAuth, privateAvailable, webAuth, webAvailable, guard }, username) {
+  const activeGuard = activeInstagramGuardState(guard);
+  if (activeGuard?.reason === "AUTH_REQUIRED") {
+    return "⚠️ Instagram — החיבור נעצר ודורש חידוש חד-פעמי";
+  }
+  if (activeGuard) {
+    const until = new Date(activeGuard.until).toLocaleString("he-IL", { timeZone: "Asia/Jerusalem" });
+    return `⏸️ Instagram — החיבור שמור; הסריקות בהשהיית הגנה עד ${until}`;
+  }
+  if (privateAvailable && privateAuth?.status !== "EXPIRED") {
+    return `✅ Instagram — הסשן הקבוע מהמחשב פעיל עבור @${privateAuth?.username || username}`;
+  }
+  if (webAvailable && webAuth?.status !== "EXPIRED") {
+    return `✅ Instagram — חיבור הדפדפן פעיל עבור @${webAuth?.username || username}`;
+  }
+  return "⬜ Instagram — אין חיבור פעיל";
+}

@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import {
   createYoutubeWorkerToken,
   verifyYoutubeWorkerToken,
-  dispatchYoutubeWorker
+  dispatchYoutubeWorker,
+  claimNextYoutubeJob
 } from "../src/youtube-worker.js";
 
 test("creates a short-lived signed YouTube worker token", () => {
@@ -41,4 +42,16 @@ test("dispatches only the opaque callback token to the GitHub worker", async () 
 
 test("does not dispatch without a configured GitHub token", async () => {
   assert.equal(await dispatchYoutubeWorker("opaque-token", { githubActionsToken: "" }), false);
+});
+
+test("leases a queued YouTube job so parallel workers cannot claim it", () => {
+  const now = Date.parse("2026-08-13T12:00:00Z");
+  const jobs = {
+    a: { chatId: "42", createdAt: now - 10_000 },
+    b: { chatId: "42", createdAt: now - 5_000 }
+  };
+  assert.equal(claimNextYoutubeJob(jobs, "42", now, 20_000).jobId, "a");
+  assert.equal(claimNextYoutubeJob(jobs, "42", now, 20_000).jobId, "b");
+  assert.equal(claimNextYoutubeJob(jobs, "42", now, 20_000), null);
+  assert.equal(claimNextYoutubeJob(jobs, "42", now + 20_001, 20_000).jobId, "a");
 });
