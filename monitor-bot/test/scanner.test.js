@@ -74,6 +74,8 @@ test("defers only very recent Instagram scans to avoid account throttling", () =
   assert.equal(shouldDeferInstagramScan(recent, 10 * 60_000, now), true);
   assert.equal(shouldDeferInstagramScan(old, 10 * 60_000, now), false);
   assert.equal(shouldDeferInstagramScan({ ...recent, platform: "YouTube" }, 10 * 60_000, now), false);
+  assert.equal(shouldDeferInstagramScan({ ...old, lastError: "DEFERRED:Instagram:RATE_LIMIT" }, 10 * 60_000, now), true);
+  assert.equal(shouldDeferInstagramScan({ ...old, lastCheckedAt: "2026-08-13T06:29:00Z", lastError: "DEFERRED:Instagram:RATE_LIMIT" }, 10 * 60_000, now), false);
 });
 
 test("recognizes temporary Instagram deferrals as non-authentication failures", () => {

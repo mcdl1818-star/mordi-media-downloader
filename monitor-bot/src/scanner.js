@@ -183,7 +183,10 @@ export function shouldDeferInstagramScan(subscription, intervalMs, now = Date.no
   if (subscription?.platform !== "Instagram") return false;
   const lastChecked = Date.parse(subscription.lastCheckedAt || "");
   if (!Number.isFinite(lastChecked)) return false;
-  const cooldownMs = Math.min(8 * 60_000, Math.max(2 * 60_000, Number(intervalMs || 0) * 0.75));
+  const throttled = String(subscription.lastError || "").includes("RATE_LIMIT");
+  const cooldownMs = throttled
+    ? 30 * 60_000
+    : Math.min(8 * 60_000, Math.max(2 * 60_000, Number(intervalMs || 0) * 0.75));
   const elapsed = now - lastChecked;
   return elapsed >= 0 && elapsed < cooldownMs;
 }
@@ -265,8 +268,8 @@ function collectRedirectUrls(value, output = []) {
   return output;
 }
 
-async function scanGalleryUrl(url, creator, config, visited = new Set()) {
-  if (visited.has(url) || visited.size >= 8) return [];
+async function scanGalleryUrl(url, creator, config, visited = new Set(), deadline = Date.now() + 60_000) {
+  if (visited.has(url) || visited.size >= 4 || Date.now() >= deadline) return [];
   visited.add(url);
   const args = ["--dump-json", "--range", `1-${config.maxItems}`];
   if (creator.platform === "Instagram") {
@@ -281,7 +284,8 @@ async function scanGalleryUrl(url, creator, config, visited = new Set()) {
   const cookiesPath = cookiesPathFor(creator.platform, config);
   if (cookiesPath) args.push("--cookies", cookiesPath);
   args.push("--", url);
-  const raw = await run(config.galleryDlPath, args);
+  const remainingMs = Math.max(5_000, Math.min(30_000, deadline - Date.now()));
+  const raw = await run(config.galleryDlPath, args, remainingMs);
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -295,7 +299,7 @@ async function scanGalleryUrl(url, creator, config, visited = new Set()) {
   const results = [];
   for (const redirect of [...new Set(collectRedirectUrls(parsed))]) {
     try {
-      results.push(...await scanGalleryUrl(redirect, creator, config, visited));
+      results.push(...await scanGalleryUrl(redirect, creator, config, visited, deadline));
     } catch {
       // A profile can expose posts while stories are unavailable, or vice versa.
     }
@@ -388,6 +392,15 @@ export async function scanCreator(creator, config) {
       const items = await scanInstagramSession(creator, config);
       if (items.length) return items;
     } catch (error) {
+      if (String(error.message).startsWith("DEFERRED:Instagram:") && platformCookiePath) {
+        try {
+          const items = await scanGalleryDl(creator, config);
+          if (items.length) return items;
+        } catch {
+          // Preserve the temporary private-session result and retry after backoff.
+        }
+        throw error;
+      }
       if (String(error.message).startsWith("DEFERRED:Instagram:")) throw error;
       if (!platformCookiePath) throw error;
       firstError = error;
