@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   createInstagramConnectToken,
   verifyInstagramConnectToken,
+  instagramConnectTokenFingerprint,
+  createCreatorMonitorScanPath,
   instagramUsernameFromConnectToken,
   normalizeInstagramUsername,
   encryptInstagramSession,
@@ -23,6 +25,20 @@ test("creates a short-lived Instagram connection token for one Telegram user", (
   assert.equal(verifyInstagramConnectToken(token, "secret", "123", 6_001), false);
   assert.equal(verifyInstagramConnectToken(token, "secret", "456", 2_000), false);
   assert.equal(verifyInstagramConnectToken(`${token}x`, "secret", "123", 2_000), false);
+});
+
+test("stores only a stable fingerprint for consumed one-time tokens", () => {
+  const token = createInstagramConnectToken("secret", "123", 1_000, 5_000);
+  const fingerprint = instagramConnectTokenFingerprint(token);
+  assert.match(fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(fingerprint.includes(token), false);
+  assert.equal(instagramConnectTokenFingerprint(token), fingerprint);
+});
+
+test("creates an unguessable scan path from the deployment secret", () => {
+  const scanPath = createCreatorMonitorScanPath("deployment-secret");
+  assert.match(scanPath, /^\/scan\/[a-f0-9]{64}$/);
+  assert.notEqual(scanPath, createCreatorMonitorScanPath("another-secret"));
 });
 
 test("binds a preset Instagram username into the signed token", () => {

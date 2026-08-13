@@ -7,5 +7,6 @@ cookies/
 browser-profiles/
 logs/
 node_modules/
+.tools/
 __pycache__/
 *.pyc

@@ -24,6 +24,25 @@ def iso_time(value):
     return str(value or "")
 
 
+def configure_stable_client(client, seed):
+    if len(seed) < 32:
+        output({"status": "ERROR", "message": "Missing stable device seed"}, 2)
+    stable = lambda label: str(uuid5(NAMESPACE_URL, f"mordi-instagram:{seed}:{label}"))
+    client.set_uuids({
+        "phone_id": stable("phone_id"),
+        "uuid": stable("uuid"),
+        "client_session_id": stable("client_session_id"),
+        "advertising_id": stable("advertising_id"),
+        "android_device_id": "android-" + hashlib.sha256(f"{seed}:android".encode()).hexdigest()[:16],
+        "request_id": stable("request_id"),
+        "tray_session_id": stable("tray_session_id"),
+    })
+    client.set_country("IL")
+    client.set_country_code(972)
+    client.set_locale("he_IL")
+    client.set_timezone_offset(10800, "Asia/Jerusalem")
+
+
 def login():
     from instagrapi import Client
     client = None
@@ -48,22 +67,7 @@ def login():
         client = Client(settings=saved_settings or {})
         if not saved_settings:
             seed = str(payload.get("deviceSeed", "")).strip()
-            if len(seed) < 32:
-                output({"status": "ERROR", "message": "Missing stable device seed"}, 2)
-            stable = lambda label: str(uuid5(NAMESPACE_URL, f"mordi-instagram:{seed}:{label}"))
-            client.set_uuids({
-                "phone_id": stable("phone_id"),
-                "uuid": stable("uuid"),
-                "client_session_id": stable("client_session_id"),
-                "advertising_id": stable("advertising_id"),
-                "android_device_id": "android-" + hashlib.sha256(f"{seed}:android".encode()).hexdigest()[:16],
-                "request_id": stable("request_id"),
-                "tray_session_id": stable("tray_session_id"),
-            })
-            client.set_country("IL")
-            client.set_country_code(972)
-            client.set_locale("he_IL")
-            client.set_timezone_offset(10800, "Asia/Jerusalem")
+            configure_stable_client(client, seed)
         client.delay_range = [1, 3]
         if code:
             client.challenge_code_handler = lambda _username, _choice: code
@@ -97,6 +101,29 @@ def login():
         if name in ("ClientConnectionError", "ClientJSONDecodeError", "ClientProxyConnectionError", "ConnectTimeout", "ReadTimeout"):
             result("NETWORK_ERROR", reason=name)
         result("LOGIN_REJECTED", reason=name)
+
+
+def import_session():
+    from instagrapi import Client
+    try:
+        payload = json.load(sys.stdin)
+        session_id = str(payload.get("sessionid", "")).strip()
+        username = str(payload.get("username", "")).strip()
+        saved_settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else None
+        if len(session_id) < 20 or not username:
+            output({"status": "INVALID_SESSION"})
+        client = Client(settings=saved_settings or {})
+        if not saved_settings:
+            configure_stable_client(client, str(payload.get("deviceSeed", "")).strip())
+        client.delay_range = [1, 3]
+        if not client.login_by_sessionid(session_id):
+            output({"status": "WEB_SESSION_ONLY"})
+        settings = client.get_settings()
+        if not str(settings.get("authorization_data", {}).get("sessionid", "")):
+            output({"status": "WEB_SESSION_ONLY"})
+        output({"status": "OK", "username": username, "session": settings})
+    except Exception as error:
+        output({"status": "WEB_SESSION_ONLY", "reason": type(error).__name__})
 
 
 def media_parts(media, username, kind):
@@ -196,6 +223,8 @@ if __name__ == "__main__":
         output({"status": "ERROR", "message": "Missing command"}, 2)
     if sys.argv[1] == "login":
         login()
+    if sys.argv[1] == "import-session":
+        import_session()
     if sys.argv[1] == "scan":
         scan()
     output({"status": "ERROR", "message": "Unknown command"}, 2)

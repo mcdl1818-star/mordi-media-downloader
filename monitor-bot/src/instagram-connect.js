@@ -32,6 +32,15 @@ export function verifyInstagramConnectToken(token, secret, userId, now = Date.no
   return Boolean(readInstagramConnectToken(token, secret, userId, now));
 }
 
+export function instagramConnectTokenFingerprint(token) {
+  return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+}
+
+export function createCreatorMonitorScanPath(secret) {
+  const value = crypto.createHash("sha256").update(`creator-monitor-scan:${String(secret || "")}`).digest("hex");
+  return `/scan/${value}`;
+}
+
 export function instagramUsernameFromConnectToken(token, secret, userId, now = Date.now()) {
   const username = normalizeInstagramUsername(readInstagramConnectToken(token, secret, userId, now)?.username);
   return /^[A-Za-z0-9._]{1,30}$/.test(username) ? username : "";
@@ -92,9 +101,9 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
 }
 
-export function runInstagramLogin(config, credentials) {
+function runInstagramBridge(config, command, payload) {
   return new Promise((resolve, reject) => {
-    const child = spawn(config.pythonPath, [config.instagramBridgePath, "login"], {
+    const child = spawn(config.pythonPath, [config.instagramBridgePath, command], {
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -117,6 +126,14 @@ export function runInstagramLogin(config, credentials) {
         reject(new Error(`ההתחברות ל-Instagram נכשלה (bridge ${code ?? "unknown"})`));
       }
     });
-    child.stdin.end(JSON.stringify(credentials));
+    child.stdin.end(JSON.stringify(payload));
   });
+}
+
+export function runInstagramLogin(config, credentials) {
+  return runInstagramBridge(config, "login", credentials);
+}
+
+export function runInstagramSessionImport(config, payload) {
+  return runInstagramBridge(config, "import-session", payload);
 }

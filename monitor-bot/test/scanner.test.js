@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateCreatorUrl, parseYouTubeFeed, normalizeItems } from "../src/scanner.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  validateCreatorUrl,
+  parseYouTubeFeed,
+  normalizeItems,
+  instagramSessionCookieExpired,
+  isLikelyAuthenticationFailure
+} from "../src/scanner.js";
 
 test("accepts supported creator URLs", () => {
   assert.equal(validateCreatorUrl("https://www.youtube.com/@OpenAI").platform, "YouTube");
@@ -38,6 +47,23 @@ test("normalizes each Instagram story with its stable ID and direct media", () =
     directMediaUrl: "https://cdn.example/story.mp4",
     mediaKind: "video"
   }]);
+});
+
+test("detects a missing or expired Instagram session cookie", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "monitor-cookie-test-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "cookies.txt");
+  fs.writeFileSync(file, ".instagram.com\tTRUE\t/\tTRUE\t100\tsessionid\t12345678901234567890\n");
+  assert.equal(instagramSessionCookieExpired(file, 101), true);
+  assert.equal(instagramSessionCookieExpired(file, 99), false);
+  fs.writeFileSync(file, ".instagram.com\tTRUE\t/\tTRUE\t0\tcsrftoken\tvalue\n");
+  assert.equal(instagramSessionCookieExpired(file, 99), true);
+});
+
+test("recognizes authentication failures without classifying timeouts as expired sessions", () => {
+  assert.equal(isLikelyAuthenticationFailure(new Error("login_required")), true);
+  assert.equal(isLikelyAuthenticationFailure(new Error("HTTP 403")), true);
+  assert.equal(isLikelyAuthenticationFailure(new Error("request timed out")), false);
 });
 
 test("rejects single publication URLs", () => {

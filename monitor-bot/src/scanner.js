@@ -162,6 +162,23 @@ function cookiesPathFor(platform, config) {
   return "";
 }
 
+export function instagramSessionCookieExpired(file, nowSeconds = Math.floor(Date.now() / 1000)) {
+  if (!file || !fs.existsSync(file)) return true;
+  for (const rawLine of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+    if (!rawLine || (rawLine.startsWith("#") && !rawLine.startsWith("#HttpOnly_"))) continue;
+    const parts = rawLine.split("\t");
+    if (parts.length < 7 || parts[5] !== "sessionid") continue;
+    const expires = Number(parts[4]) || 0;
+    return !parts[6] || (expires > 0 && expires <= nowSeconds);
+  }
+  return true;
+}
+
+export function isLikelyAuthenticationFailure(error) {
+  return /(?:auth(?:entication)?[_ -]?required|login[_ -]?required|not logged in|session (?:has )?expired|invalid (?:cookie|session)|cookie.+expired|HTTP (?:401|403)|challenge_required)/i
+    .test(String(error?.message || error || ""));
+}
+
 async function scanYtDlp(creator, config) {
   const args = [
     "--flat-playlist", "--playlist-end", String(config.maxItems),
@@ -276,7 +293,8 @@ async function scanGalleryDl(creator, config) {
 function netscapeCookieHeader(file) {
   if (!file || !fs.existsSync(file)) return "";
   return fs.readFileSync(file, "utf8").split(/\r?\n/)
-    .filter(line => line && !line.startsWith("#"))
+    .filter(line => line && (!line.startsWith("#") || line.startsWith("#HttpOnly_")))
+    .map(line => line.replace(/^#HttpOnly_/, ""))
     .map(line => line.split("\t"))
     .filter(parts => parts.length >= 7)
     .map(parts => `${parts[5]}=${parts[6]}`)
@@ -342,12 +360,21 @@ export async function scanCreator(creator, config) {
       // Continue to yt-dlp, which also covers playlists and unusual channel URLs.
     }
   }
-  if (creator.platform === "Instagram" && config.instagramSessionPath) {
-    const items = await scanInstagramSession(creator, config);
-    if (items.length) return items;
-  }
   const needsSession = ["Instagram", "Facebook", "X"].includes(creator.platform);
+  const platformCookiePath = cookiesPathFor(creator.platform, config);
+  if (creator.platform === "Instagram" && platformCookiePath && instagramSessionCookieExpired(platformCookiePath)) {
+    throw new Error("AUTH_REQUIRED:Instagram");
+  }
   let firstError;
+  if (creator.platform === "Instagram" && config.instagramSessionPath) {
+    try {
+      const items = await scanInstagramSession(creator, config);
+      if (items.length) return items;
+    } catch (error) {
+      if (!platformCookiePath) throw error;
+      firstError = error;
+    }
+  }
   try {
     const items = await scanYtDlp(creator, config);
     if (items.length) return items;
@@ -366,7 +393,7 @@ export async function scanCreator(creator, config) {
   } catch (error) {
     firstError ||= error;
   }
-  if (needsSession && !cookiesPathFor(creator.platform, config)) {
+  if (needsSession && (!platformCookiePath || isLikelyAuthenticationFailure(firstError))) {
     throw new Error(`AUTH_REQUIRED:${creator.platform}`);
   }
   throw firstError || new Error("לא נמצאו פרסומים ציבוריים בפרופיל.");
