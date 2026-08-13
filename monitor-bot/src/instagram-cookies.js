@@ -78,6 +78,18 @@ export function instagramCookiesFromNetscape(value) {
   return normalizeInstagramCookies(cookies);
 }
 
+export function instagramCookiesFromExport(value) {
+  const text = Buffer.isBuffer(value) ? value.toString("utf8") : String(value || "");
+  try {
+    const parsed = JSON.parse(text);
+    const cookies = Array.isArray(parsed) ? parsed : parsed?.cookies;
+    if (Array.isArray(cookies)) return normalizeInstagramCookies(cookies);
+  } catch {
+    // Netscape exports are plain text and are parsed below.
+  }
+  return instagramCookiesFromNetscape(text);
+}
+
 export function instagramCookieFingerprint(value) {
   const cookies = typeof value === "string" ? instagramCookiesFromNetscape(value) : normalizeInstagramCookies(value);
   const stable = cookies

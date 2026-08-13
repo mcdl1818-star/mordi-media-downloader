@@ -23,6 +23,7 @@ import {
   normalizeInstagramCookies,
   instagramCookiesToNetscape,
   instagramCookiesFromNetscape,
+  instagramCookiesFromExport,
   instagramCookieFingerprint
 } from "./instagram-cookies.js";
 
@@ -67,11 +68,18 @@ const help = `שלח קישור לפרופיל או לערוץ כדי להתחי
 const AUTH_FILES = {
   "instagram-session.enc": "Instagram",
   "instagram-cookies.txt": "Instagram",
+  "cookies.txt": "Instagram",
   "facebook-cookies.txt": "Facebook",
   "tiktok-cookies.txt": "TikTok",
   "x-cookies.txt": "X",
   "twitter-cookies.txt": "X"
 };
+
+function isInstagramCookieExport(filename) {
+  return filename === "cookies.txt"
+    || filename === "instagram-cookies.txt"
+    || (/instagram/i.test(filename) && /\.(?:txt|json)$/i.test(filename));
+}
 
 async function hydrateAuth(platform) {
   const auth = store.state.auth?.[platform];
@@ -223,7 +231,7 @@ async function saveInstagramWebCookies(cookies, username) {
     const sent = await telegram.sendDocument(
       config.allowedUserId,
       encrypted,
-      "🔐 גיבוי מוצפן של חיבור Instagram מהפיקסל — אין למחוק",
+      "🔐 גיבוי מוצפן של חיבור Instagram מהטלפון — אין למחוק",
       { filename: "instagram-web-cookies.enc", disableNotification: true }
     );
     const previousMessageId = store.state.auth?.InstagramWeb?.messageId;
@@ -263,6 +271,55 @@ async function refreshInstagramWebBackupIfChanged() {
   if (fingerprint === instagramWebCookieFingerprint) return;
   const username = store.state.auth?.InstagramWeb?.username || config.instagramLoginUsername;
   await saveInstagramWebCookies(instagramCookiesFromNetscape(netscape), username);
+}
+
+async function importInstagramCookieDocument(message) {
+  const filename = message.document.file_name?.toLowerCase() || "";
+  if (!isInstagramCookieExport(filename)) throw new Error("Unsupported Instagram cookie filename");
+  if (Number(message.document.file_size || 0) > 512_000) throw new Error("Instagram cookie file is too large");
+  await fs.promises.mkdir(config.tempDir, { recursive: true });
+  const temporary = path.join(config.tempDir, `instagram-cookie-upload-${crypto.randomUUID()}`);
+  try {
+    await telegram.downloadFile(message.document.file_id, temporary);
+    const contents = await fs.promises.readFile(temporary);
+    if (contents.length > 512_000) throw new Error("Instagram cookie file is too large");
+    const cookies = instagramCookiesFromExport(contents);
+    const username = config.instagramLoginUsername;
+    const bootstrapSettings = await loadInstagramBootstrap(username);
+    await saveInstagramWebCookies(cookies, username);
+    try {
+      const result = await runInstagramSessionImport(config, {
+        username,
+        sessionid: cookies.find(cookie => cookie.name === "sessionid").value,
+        deviceSeed: instagramDeviceSeed(username),
+        settings: bootstrapSettings
+      });
+      if (result.status === "OK" && result.session) {
+        await saveInstagramSession(result.session, result.username || username);
+      }
+    } catch (error) {
+      console.warn("Instagram private session import unavailable; web session remains active:", error.message);
+    }
+  } finally {
+    await fs.promises.rm(temporary, { force: true });
+    await telegram.call("deleteMessage", {
+      chat_id: message.chat.id,
+      message_id: message.message_id
+    }).catch(() => {});
+  }
+}
+
+function sendInstagramFileInstructions(chatId) {
+  return telegram.sendMessage(chatId,
+    "📱 חיבור Instagram ללא כבל וללא אפשרויות מפתחים:\n\n" +
+    "1. התקן Firefox מה‑Play Store.\n" +
+    "2. מתוך Firefox התקן את התוסף cookies.txt הרשמי של Mozilla:\n" +
+    "https://addons.mozilla.org/android/addon/cookies-txt/\n" +
+    "3. ב‑Firefox פתח instagram.com והתחבר ל‑@vogelnati.\n" +
+    "4. פתח את התוסף ושמור את cookies.txt.\n" +
+    "5. שלח את הקובץ כאן לבוט.\n\n" +
+    "הבוט ישמור רק cookies של instagram.com, יצפין אותם וימחק מיד את הקובץ הגלוי מהשיחה."
+  );
 }
 
 async function saveInstagramSession(session, username) {
@@ -444,6 +501,15 @@ async function handleMessage(message) {
     if (!platform) {
       return telegram.sendMessage(chatId, `שם הקובץ אינו מוכר. שמות נתמכים:\n${[...new Set(Object.keys(AUTH_FILES))].join("\n")}`);
     }
+    if (platform === "Instagram" && isInstagramCookieExport(filename)) {
+      try {
+        await importInstagramCookieDocument(message);
+        return telegram.sendMessage(chatId, "✅ חיבור Instagram נשמר והוצפן. הקובץ הגלוי נמחק; אפשר לשלוח עכשיו קישור לפרופיל למעקב.");
+      } catch (error) {
+        console.warn("Instagram cookie import:", error.message);
+        return telegram.sendMessage(chatId, "❌ הקובץ לא הכיל סשן Instagram פעיל. פתח instagram.com ב‑Firefox, ודא שאתה מחובר, וייצא שוב cookies.txt מהלשונית של Instagram.");
+      }
+    }
     store.state.auth ||= {};
     store.state.auth[platform] = {
       fileId: message.document.file_id,
@@ -456,6 +522,7 @@ async function handleMessage(message) {
     return telegram.sendMessage(chatId, `✅ ההתחברות ל-${platform} נשמרה בענן. אפשר לשלוח עכשיו את קישור הפרופיל.`);
   }
   if (text === "/start" || text === "/help") return telegram.sendMessage(chatId, help);
+  if (/^\/instagram_file(?:@\w+)?$/i.test(text)) return sendInstagramFileInstructions(chatId);
   const instagramCommand = text.match(/^\/(?:instagram|connect_instagram)(?:@\w+)?(?:\s+(.+))?$/i);
   if (instagramCommand) return sendInstagramConnect(chatId, instagramCommand[1] || "");
   if (text === "/auth") {
@@ -465,8 +532,8 @@ async function handleMessage(message) {
     const instagramWeb = store.state.auth?.InstagramWeb;
     if (instagramWeb && config.platformCookies.Instagram) {
       lines[0] = instagramWeb.status === "EXPIRED"
-        ? "⚠️ Instagram — חיבור Pixel דורש חידוש"
-        : `✅ Instagram — חיבור Pixel פעיל עבור @${instagramWeb.username || config.instagramLoginUsername}`;
+        ? "⚠️ Instagram — החיבור מהטלפון דורש חידוש"
+        : `✅ Instagram — החיבור מהטלפון פעיל עבור @${instagramWeb.username || config.instagramLoginUsername}`;
     }
     const pending = store.state.auth?.InstagramBootstrap;
     if (pending && !config.instagramSessionPath && !config.platformCookies.Instagram) {
@@ -504,6 +571,7 @@ function configureBotCommands() {
   return telegram.call("setMyCommands", {
     commands: [
       { command: "instagram", description: "חיבור Instagram מהטלפון" },
+      { command: "instagram_file", description: "חיבור Instagram ללא כבל" },
       { command: "list", description: "רשימת המעקבים" },
       { command: "check", description: "בדיקה מיידית" },
       { command: "auth", description: "מצב החיבורים" },
@@ -639,8 +707,8 @@ async function handleInstagramSessionConnect(request, response) {
   await telegram.sendMessage(
     config.allowedUserId,
     mode === "private"
-      ? "✅ חיבור Instagram מה‑Pixel נשמר והומר לסשן קבוע. אפשר לשלוח עכשיו קישור לפרופיל למעקב."
-      : "✅ חיבור Instagram מה‑Pixel נשמר ומוצפן. פוסטים, Reels ו‑Stories ייבדקו דרך סשן הדפדפן גם כשהטלפון והמחשב כבויים."
+      ? "✅ חיבור Instagram מהטלפון נשמר והומר לסשן קבוע. אפשר לשלוח עכשיו קישור לפרופיל למעקב."
+      : "✅ חיבור Instagram מהטלפון נשמר ומוצפן. פוסטים, Reels ו‑Stories ייבדקו דרך סשן הדפדפן גם כשהטלפון והמחשב כבויים."
   ).catch(console.error);
   sendJson(response, 200, { ok: true, mode });
 }

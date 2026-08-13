@@ -4,6 +4,7 @@ import {
   normalizeInstagramCookies,
   instagramCookiesToNetscape,
   instagramCookiesFromNetscape,
+  instagramCookiesFromExport,
   instagramCookieFingerprint
 } from "../src/instagram-cookies.js";
 
@@ -28,6 +29,17 @@ test("round-trips a private Instagram Netscape cookie file", () => {
   const restored = instagramCookiesFromNetscape(netscape);
   assert.equal(restored.find(cookie => cookie.name === "sessionid").httpOnly, true);
   assert.equal(instagramCookieFingerprint(restored), instagramCookieFingerprint(netscape));
+});
+
+test("accepts Firefox JSON exports while discarding every non-Instagram cookie", () => {
+  const cookies = instagramCookiesFromExport(JSON.stringify(validCookies));
+  assert.equal(cookies.length, 2);
+  assert.deepEqual(cookies.map(cookie => cookie.name).sort(), ["csrftoken", "sessionid"]);
+});
+
+test("accepts Firefox cookies.txt Netscape exports", () => {
+  const netscape = instagramCookiesToNetscape(validCookies);
+  assert.equal(instagramCookiesFromExport(Buffer.from(netscape)).some(cookie => cookie.name === "sessionid"), true);
 });
 
 test("rejects control characters and oversized session values", () => {
