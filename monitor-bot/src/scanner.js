@@ -718,7 +718,7 @@ export async function scanCreator(creator, config, dependencies = {}) {
   throw firstError || new Error("לא נמצאו פרסומים ציבוריים בפרופיל.");
 }
 
-export async function downloadVideo(item, config) {
+export async function downloadVideo(item, config, { allowPlatformCookies = true } = {}) {
   await fs.promises.mkdir(config.tempDir, { recursive: true });
   const directory = path.join(config.tempDir, crypto.randomUUID());
   await fs.promises.mkdir(directory);
@@ -777,7 +777,7 @@ export async function downloadVideo(item, config) {
         // yt-dlp already discovers a PATH-installed ffmpeg. Passing the bare
         // word "ffmpeg" to --ffmpeg-location is interpreted as a directory
         // and produces a misleading warning on Render.
-        const cookiesPath = cookiesPathFor(item.platform, config);
+        const cookiesPath = allowPlatformCookies ? cookiesPathFor(item.platform, config) : "";
         if (cookiesPath) args.push("--cookies", cookiesPath);
         args.push("--", item.url);
         await run(config.ytDlpPath, args, 10 * 60_000);

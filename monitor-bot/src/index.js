@@ -804,7 +804,9 @@ async function downloadRequestedMedia(chatId, mediaUrl) {
   const status = await telegram.sendMessage(chatId, `⬇️ מוריד עכשיו מ-${item.platform}...`);
   let file;
   try {
-    file = await downloadVideo(item, config);
+    file = await downloadVideo(item, config, {
+      allowPlatformCookies: item.platform !== "Instagram"
+    });
     const size = (await fs.promises.stat(file)).size;
     if (size > config.maxBytes) throw new Error("הקובץ גדול ממגבלת Telegram");
     const caption = `✅ הורד מ-${item.platform}\n${item.url}`;
